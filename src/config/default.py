@@ -107,6 +107,19 @@ _CN.DATASET.MGDPT_IMG_PAD = True  # pad img to square with size = MGDPT_IMG_RESI
 _CN.DATASET.MGDPT_DEPTH_PAD = True  # pad depthmap to square with size = 2000
 _CN.DATASET.MGDPT_DF = 8
 
+# RoadScene options (only consulted when TRAINVAL_DATA_SOURCE == 'RoadScene')
+_CN.DATASET.ROAD_IR_SUBDIR = 'cropinfrared'
+_CN.DATASET.ROAD_VIS_SUBDIR = 'crop_HR_visible'
+_CN.DATASET.ROAD_IMG_RESIZE = 480     # longer-edge target before df-rounding
+_CN.DATASET.ROAD_DF = 32              # final H, W are multiples of df
+# Square canvas size after zero-padding (must be >= ROAD_IMG_RESIZE and divisible
+# by ROAD_DF). All samples are padded to (ROAD_PAD_SIZE, ROAD_PAD_SIZE) so the
+# DataLoader can stack tensors of identical shape into a batch (batch_size > 1).
+# When None, defaults to ROAD_IMG_RESIZE rounded up to ROAD_DF at runtime.
+_CN.DATASET.ROAD_PAD_SIZE = None
+_CN.DATASET.ROAD_HOMOGRAPHY_AUG = True  # train-only random Homography on VIS
+_CN.DATASET.ROAD_HOMOGRAPHY_PROB = 1.0
+
 _CN.DATASET.NPE_NAME = None
 
 ##############  Trainer  ##############

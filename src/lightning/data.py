@@ -25,6 +25,7 @@ from src.utils.misc import tqdm_joblib
 from src.utils import comm
 from src.datasets.megadepth import MegaDepthDataset
 from src.datasets.scannet import ScanNetDataset
+from src.datasets.roadscene import RoadSceneDataset
 from src.datasets.sampler import RandomConcatSampler
 
 
@@ -76,6 +77,18 @@ class MultiSceneDataModule(pl.LightningDataModule):
         self.mgdpt_df = config.DATASET.MGDPT_DF  # 8
         self.coarse_scale = 1 / config.LOFTR.RESOLUTION[0]  # 0.125. for training loftr.
 
+        # RoadScene options (only consulted when DATA_SOURCE == 'RoadScene')
+        self.road_ir_subdir = getattr(config.DATASET, 'ROAD_IR_SUBDIR', 'cropinfrared')
+        self.road_vis_subdir = getattr(config.DATASET, 'ROAD_VIS_SUBDIR', 'crop_HR_visible')
+        self.road_img_resize = getattr(config.DATASET, 'ROAD_IMG_RESIZE', 480)
+        self.road_df = getattr(config.DATASET, 'ROAD_DF', 32)
+        # ROAD_PAD_SIZE may be None (resolved to img_resize-rounded-to-df inside the dataset)
+        self.road_pad_size = getattr(config.DATASET, 'ROAD_PAD_SIZE', None)
+        self.road_homography_aug = getattr(config.DATASET, 'ROAD_HOMOGRAPHY_AUG', True)
+        self.road_homography_prob = getattr(config.DATASET, 'ROAD_HOMOGRAPHY_PROB', 1.0)
+        self.road_homography_kwargs = dict(getattr(config.DATASET,
+                                                  'ROAD_HOMOGRAPHY_KWARGS', {}))
+
         self.fp16 = config.DATASET.FP16
 
         # 3.loader parameters
@@ -119,15 +132,14 @@ class MultiSceneDataModule(pl.LightningDataModule):
 
         assert stage in ['fit', 'validate', 'test'], "stage must be either fit or test"
 
-        try:
+        if dist.is_available() and dist.is_initialized():
             self.world_size = dist.get_world_size()
             self.rank = dist.get_rank()
             logger.info(f"[rank:{self.rank}] world_size: {self.world_size}")
-        except AssertionError as ae:
+        else:
             self.world_size = 1
             self.rank = 0
-            # logger.warning(" (set wolrd_size=1 and rank=0)")
-            logger.warning(str(ae) + " (set wolrd_size=1 and rank=0)")
+            logger.warning("Distributed process group is not initialized. Set world_size=1 and rank=0.")
 
         if stage == 'fit':
             self.train_dataset = self._setup_dataset(
@@ -206,6 +218,30 @@ class MultiSceneDataModule(pl.LightningDataModule):
                        min_overlap_score=0.,
                        pose_dir=None):
         """ Setup train / val / test set"""
+        # RoadScene uses a single flat txt list of image filenames rather than
+        # per-scene .npz files, so we short-circuit the per-scene iteration
+        # used by ScanNet/MegaDepth and build one RoadSceneDataset directly.
+        data_source = self.trainval_data_source if mode in ['train', 'val'] else self.test_data_source
+        if str(data_source).lower() == 'roadscene':
+            logger.info(f'[rank {self.rank}]: building RoadSceneDataset from {scene_list_path}')
+            ds = RoadSceneDataset(
+                root_dir=data_root,
+                list_path=scene_list_path,
+                mode=mode,
+                ir_subdir=self.road_ir_subdir,
+                vis_subdir=self.road_vis_subdir,
+                img_resize=self.road_img_resize,
+                pad_size=self.road_pad_size,
+                df=self.road_df,
+                coarse_scale=self.coarse_scale,
+                homography_aug=(self.road_homography_aug and mode == 'train'),
+                homography_prob=self.road_homography_prob,
+                homography_kwargs=self.road_homography_kwargs,
+                augment_fn=(self.augment_fn if mode == 'train' else None),
+                fp16=self.fp16,
+            )
+            return ConcatDataset([ds])
+
         with open(scene_list_path, 'r') as f:
             npz_names = [name.split()[0] for name in f.readlines()]
 
@@ -337,20 +373,29 @@ class MultiSceneDataModule(pl.LightningDataModule):
     def val_dataloader(self):
         """ Build validation dataloader for ScanNet / MegaDepth. """
         logger.info(f'[rank:{self.rank}/{self.world_size}]: Val Sampler and DataLoader re-init.')
+        use_distributed = dist.is_available() and dist.is_initialized() and self.world_size > 1
         if not isinstance(self.val_dataset, abc.Sequence):
-            sampler = DistributedSampler(self.val_dataset, shuffle=False)
-            return DataLoader(self.val_dataset, sampler=sampler, **self.val_loader_params)
+            if use_distributed:
+                sampler = DistributedSampler(self.val_dataset, shuffle=False)
+                return DataLoader(self.val_dataset, sampler=sampler, **self.val_loader_params)
+            return DataLoader(self.val_dataset, **self.val_loader_params)
         else:
             dataloaders = []
             for dataset in self.val_dataset:
-                sampler = DistributedSampler(dataset, shuffle=False)
-                dataloaders.append(DataLoader(dataset, sampler=sampler, **self.val_loader_params))
+                if use_distributed:
+                    sampler = DistributedSampler(dataset, shuffle=False)
+                    dataloaders.append(DataLoader(dataset, sampler=sampler, **self.val_loader_params))
+                else:
+                    dataloaders.append(DataLoader(dataset, **self.val_loader_params))
             return dataloaders
 
     def test_dataloader(self, *args, **kwargs):
         logger.info(f'[rank:{self.rank}/{self.world_size}]: Test Sampler and DataLoader re-init.')
-        sampler = DistributedSampler(self.test_dataset, shuffle=False)
-        return DataLoader(self.test_dataset, sampler=sampler, **self.test_loader_params)
+        use_distributed = dist.is_available() and dist.is_initialized() and self.world_size > 1
+        if use_distributed:
+            sampler = DistributedSampler(self.test_dataset, shuffle=False)
+            return DataLoader(self.test_dataset, sampler=sampler, **self.test_loader_params)
+        return DataLoader(self.test_dataset, **self.test_loader_params)
 
 
 def _build_dataset(dataset: Dataset, *args, **kwargs):

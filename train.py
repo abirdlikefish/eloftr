@@ -18,6 +18,9 @@ from src.lightning.data import MultiSceneDataModule
 from src.lightning.lightning_loftr import PL_LoFTR
 import torch
 
+import numpy as np
+np.Inf = np.inf
+
 loguru_logger = get_rank_zero_only_logger(loguru_logger)
 
 import os
@@ -121,25 +124,44 @@ def main():
 
     # Callbacks
     # TODO: update ModelCheckpoint to monitor multiple metrics
-    ckpt_callback = ModelCheckpoint(monitor='auc@10', verbose=True, save_top_k=5, mode='max',
-                                    save_last=True,
-                                    dirpath=str(ckpt_dir),
-                                    filename='{epoch}-{auc@5:.3f}-{auc@10:.3f}-{auc@20:.3f}')
     lr_monitor = LearningRateMonitor(logging_interval='step')
     callbacks = [lr_monitor]
     if not args.disable_ckpt:
+        # Pick monitored metric + filename template based on the dataset.
+        # ScanNet/MegaDepth use the geometric AUC@10; RoadScene has no camera
+        # geometry so we monitor pixel precision@3px logged by PL_LoFTR.
+        if config.DATASET.TRAINVAL_DATA_SOURCE == 'RoadScene':
+            monitor_metric = 'precision@3px'
+            monitor_mode = 'max'
+            filename_tpl = '{epoch}-{precision@1px:.3f}-{precision@3px:.3f}-{precision@5px:.3f}'
+        else:
+            monitor_metric = 'auc@10'
+            monitor_mode = 'max'
+            filename_tpl = '{epoch}-{auc@5:.3f}-{auc@10:.3f}-{auc@20:.3f}'
+        ckpt_callback = ModelCheckpoint(monitor=monitor_metric, verbose=True, save_top_k=5, mode=monitor_mode,
+                                        save_last=True,
+                                        dirpath=str(ckpt_dir),
+                                        filename=filename_tpl)
         callbacks.append(ckpt_callback)
+
+    plugins = [NativeMixedPrecisionPlugin()]
+    if config.TRAINER.WORLD_SIZE > 1:
+        plugins.insert(0, DDPPlugin(find_unused_parameters=False,
+                                    num_nodes=args.num_nodes,
+                                    sync_batchnorm=True))
 
     # Lightning Trainer
     trainer = pl.Trainer.from_argparse_args(
         args,
-        plugins=[DDPPlugin(find_unused_parameters=False,
-                          num_nodes=args.num_nodes,
-                          sync_batchnorm=config.TRAINER.WORLD_SIZE > 0), NativeMixedPrecisionPlugin()],
+        # Original DDP-only setup fails on Windows single-GPU environments because NCCL is unavailable:
+        # plugins=[DDPPlugin(find_unused_parameters=False,
+        #                   num_nodes=args.num_nodes,
+        #                   sync_batchnorm=config.TRAINER.WORLD_SIZE > 0), NativeMixedPrecisionPlugin()],
+        plugins=plugins,
         gradient_clip_val=config.TRAINER.GRADIENT_CLIPPING,
         callbacks=callbacks,
         logger=logger,
-        sync_batchnorm=config.TRAINER.WORLD_SIZE > 0,
+        sync_batchnorm=config.TRAINER.WORLD_SIZE > 1,
         replace_sampler_ddp=False,  # use custom sampler
         reload_dataloaders_every_epoch=False,  # avoid repeated samples!
         weights_summary='full',

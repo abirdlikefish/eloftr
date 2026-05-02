@@ -60,7 +60,7 @@ class PL_LoFTR(pl.LightningModule):
 
         # Pretrained weights
         if pretrained_ckpt:
-            state_dict = torch.load(pretrained_ckpt, map_location='cpu')['state_dict']
+            state_dict = torch.load(pretrained_ckpt, map_location='cpu', weights_only=False)['state_dict']
             msg=self.matcher.load_state_dict(state_dict, strict=False)
             logger.info(f"Load \'{pretrained_ckpt}\' as pretrained checkpoint")
         
@@ -133,6 +133,59 @@ class PL_LoFTR(pl.LightningModule):
             }
         ret_dict = {'metrics': metrics}
         return ret_dict, rel_pair_names
+
+    @torch.no_grad()
+    def _compute_roadscene_metrics(self, batch):
+        """Pixel-error metrics for RoadScene IR-VIS validation/testing.
+
+        Uses ``batch['homography_0to1']`` to project predicted IR keypoints
+        (``mkpts0_f``) into VIS coordinates and compares against the predicted
+        VIS keypoints (``mkpts1_f``). When no Homography augmentation is
+        applied this falls back to direct same-coordinate comparison because
+        ``H = I``.
+        """
+        rel_pair_names = list(zip(*batch['pair_names']))
+        bs = batch['image0'].size(0)
+        m_bids = batch['m_bids']
+        mkpts0 = batch['mkpts0_f']
+        mkpts1 = batch['mkpts1_f']
+        mconf = batch['mconf']
+
+        # Apply per-batch Homography to mkpts0 to obtain predicted VIS coords.
+        if mkpts0.shape[0] > 0 and 'homography_0to1' in batch:
+            H = batch['homography_0to1'].to(mkpts0.dtype)
+            if H.dim() == 2:
+                H = H[None].expand(bs, -1, -1)
+            H_per_match = H[m_bids]                            # [M, 3, 3]
+            ones = torch.ones(mkpts0.size(0), 1, dtype=mkpts0.dtype, device=mkpts0.device)
+            pts_h = torch.cat([mkpts0, ones], dim=-1)[..., None]  # [M, 3, 1]
+            warped_h = torch.bmm(H_per_match, pts_h).squeeze(-1)  # [M, 3]
+            warped = warped_h[..., :2] / warped_h[..., 2:3].clamp(min=1e-8)
+            pixel_errs = torch.linalg.norm(warped - mkpts1, dim=-1)
+        else:
+            pixel_errs = torch.linalg.norm(mkpts0 - mkpts1, dim=-1)
+
+        # Stash pixel_errs on the batch so plotting can colour matches by error.
+        batch['pixel_errs'] = pixel_errs
+
+        per_pair_pixel_errs = []
+        per_pair_num_matches = []
+        per_pair_mean_conf = []
+        for b in range(bs):
+            mask = m_bids == b
+            errs = pixel_errs[mask].detach().cpu().numpy()
+            confs = mconf[mask].detach().cpu().numpy() if mconf.numel() > 0 else np.zeros(0)
+            per_pair_pixel_errs.append(errs)
+            per_pair_num_matches.append(int(mask.sum().item()))
+            per_pair_mean_conf.append(float(confs.mean()) if len(confs) else 0.0)
+
+        metrics = {
+            'identifiers': ['#'.join(rel_pair_names[b]) for b in range(bs)],
+            'pixel_errs': per_pair_pixel_errs,
+            'num_matches': per_pair_num_matches,
+            'mean_conf': per_pair_mean_conf,
+        }
+        return {'metrics': metrics}
     
     def training_step(self, batch, batch_idx):
         self._trainval_inference(batch)
@@ -163,9 +216,13 @@ class PL_LoFTR(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         self._trainval_inference(batch)
-        
-        ret_dict, _ = self._compute_metrics(batch)
-        
+
+        is_roadscene = batch['dataset_name'][0].lower() == 'roadscene'
+        if is_roadscene:
+            ret_dict = self._compute_roadscene_metrics(batch)
+        else:
+            ret_dict, _ = self._compute_metrics(batch)
+
         val_plot_interval = max(self.trainer.num_val_batches[0] // self.n_vals_plot, 1)
         figures = {self.config.TRAINER.PLOT_MODE: []}
         if batch_idx % val_plot_interval == 0:
@@ -182,7 +239,10 @@ class PL_LoFTR(pl.LightningModule):
         # handle multiple validation sets
         multi_outputs = [outputs] if not isinstance(outputs[0], (list, tuple)) else outputs
         multi_val_metrics = defaultdict(list)
-        
+
+        is_roadscene = self.config.DATASET.TRAINVAL_DATA_SOURCE == 'RoadScene'
+        roadscene_thresholds = (1.0, 3.0, 5.0)
+
         for valset_idx, outputs in enumerate(multi_outputs):
             # since pl performs sanity_check at the very begining of the training
             cur_epoch = self.trainer.current_epoch
@@ -196,11 +256,17 @@ class PL_LoFTR(pl.LightningModule):
             # 2. val metrics: dict of list, numpy
             _metrics = [o['metrics'] for o in outputs]
             metrics = {k: flattenList(all_gather(flattenList([_me[k] for _me in _metrics]))) for k in _metrics[0]}
-            # NOTE: all ranks need to `aggregate_merics`, but only log at rank-0 
-            val_metrics_4tb = aggregate_metrics(metrics, self.config.TRAINER.EPI_ERR_THR, config=self.config)
-            for thr in [5, 10, 20]:
-                multi_val_metrics[f'auc@{thr}'].append(val_metrics_4tb[f'auc@{thr}'])
-            
+
+            if is_roadscene:
+                val_metrics_4tb = self._aggregate_roadscene_metrics(metrics, roadscene_thresholds)
+                for k, v in val_metrics_4tb.items():
+                    multi_val_metrics[k].append(v)
+            else:
+                # NOTE: all ranks need to `aggregate_merics`, but only log at rank-0
+                val_metrics_4tb = aggregate_metrics(metrics, self.config.TRAINER.EPI_ERR_THR, config=self.config)
+                for thr in [5, 10, 20]:
+                    multi_val_metrics[f'auc@{thr}'].append(val_metrics_4tb[f'auc@{thr}'])
+
             # 3. figures
             _figures = [o['figures'] for o in outputs]
             figures = {k: flattenList(gather(flattenList([_me[k] for _me in _figures]))) for k in _figures[0]}
@@ -213,7 +279,7 @@ class PL_LoFTR(pl.LightningModule):
 
                 for k, v in val_metrics_4tb.items():
                     self.logger.experiment.add_scalar(f"metrics_{valset_idx}/{k}", v, global_step=cur_epoch)
-                
+
                 for k, v in figures.items():
                     if self.trainer.global_rank == 0:
                         for plot_idx, fig in enumerate(v):
@@ -221,9 +287,43 @@ class PL_LoFTR(pl.LightningModule):
                                 f'val_match_{valset_idx}/{k}/pair-{plot_idx}', fig, cur_epoch, close=True)
             plt.close('all')
 
-        for thr in [5, 10, 20]:
-            # log on all ranks for ModelCheckpoint callback to work properly
-            self.log(f'auc@{thr}', torch.tensor(np.mean(multi_val_metrics[f'auc@{thr}'])))  # ckpt monitors on this
+        if is_roadscene:
+            keys_to_log = [f'precision@{int(t)}px' for t in roadscene_thresholds]
+            keys_to_log += ['mean_pixel_error', 'num_matches']
+            for k in keys_to_log:
+                vals = multi_val_metrics.get(k, [])
+                if not vals:
+                    continue
+                self.log(k, torch.tensor(float(np.mean(vals))))
+        else:
+            for thr in [5, 10, 20]:
+                # log on all ranks for ModelCheckpoint callback to work properly
+                self.log(f'auc@{thr}', torch.tensor(np.mean(multi_val_metrics[f'auc@{thr}'])))  # ckpt monitors on this
+
+    @staticmethod
+    def _aggregate_roadscene_metrics(metrics, thresholds=(1.0, 3.0, 5.0)):
+        """Aggregate per-pair pixel errors into precision@Npx + summary stats."""
+        from collections import OrderedDict
+
+        # filter duplicates (DistributedSampler can repeat pairs)
+        unq_ids = OrderedDict((iden, idx) for idx, iden in enumerate(metrics['identifiers']))
+        unq_ids = list(unq_ids.values())
+
+        per_pair_errs = [metrics['pixel_errs'][i] for i in unq_ids]
+        per_pair_num = [metrics['num_matches'][i] for i in unq_ids]
+        per_pair_conf = [metrics['mean_conf'][i] for i in unq_ids]
+
+        all_errs = np.concatenate(per_pair_errs) if per_pair_errs else np.zeros(0)
+        results = {}
+        for t in thresholds:
+            if len(all_errs):
+                results[f'precision@{int(t)}px'] = float((all_errs < t).mean())
+            else:
+                results[f'precision@{int(t)}px'] = 0.0
+        results['mean_pixel_error'] = float(all_errs.mean()) if len(all_errs) else 0.0
+        results['num_matches'] = float(np.mean(per_pair_num)) if per_pair_num else 0.0
+        results['mean_conf'] = float(np.mean(per_pair_conf)) if per_pair_conf else 0.0
+        return results
 
     def test_step(self, batch, batch_idx):
         if (self.config.LOFTR.BACKBONE_TYPE == 'RepVGG') and not self.reparameter:

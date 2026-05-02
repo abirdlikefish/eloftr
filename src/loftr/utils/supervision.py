@@ -134,11 +134,126 @@ def spvs_coarse(data, config):
     })
 
 
+@torch.no_grad()
+def _warp_pts_homography(pts, H):
+    """Apply per-batch 3x3 Homography ``H`` to 2D points.
+
+    Args:
+        pts: [N, K, 2] (x, y) in image0 pixel coordinates.
+        H:   [N, 3, 3].
+    Returns:
+        warped: [N, K, 2] (x, y) in image1 pixel coordinates.
+        valid:  [N, K] bool mask, True if the homogeneous w is finite and > 0.
+    """
+    N, K, _ = pts.shape
+    ones = torch.ones(N, K, 1, dtype=pts.dtype, device=pts.device)
+    pts_h = torch.cat([pts, ones], dim=-1)            # [N, K, 3]
+    warped_h = torch.einsum('nij,nkj->nki', H, pts_h)  # [N, K, 3]
+    w = warped_h[..., 2:3]
+    valid = (w.abs() > 1e-8).squeeze(-1)
+    w = torch.where(w.abs() > 1e-8, w, torch.ones_like(w))
+    warped = warped_h[..., :2] / w
+    return warped, valid
+
+
+@torch.no_grad()
+def spvs_coarse_roadscene(data, config):
+    """Homography-aware coarse supervision for RoadScene.
+
+    Builds the same set of fields as :func:`spvs_coarse` but uses a per-pair
+    3x3 Homography ``data['homography_0to1']`` (identity when augmentation is
+    disabled) to project image0 coarse-grid centres into image1.
+    """
+    device = data['image0'].device
+    N, _, H0, W0 = data['image0'].shape
+    _, _, H1, W1 = data['image1'].shape
+    scale = config['LOFTR']['RESOLUTION'][0]
+    scale0 = scale * data['scale0'][:, None] if 'scale0' in data else scale
+    scale1 = scale * data['scale1'][:, None] if 'scale1' in data else scale
+    h0, w0, h1, w1 = map(lambda x: x // scale, [H0, W0, H1, W1])
+
+    grid_pt0_c = create_meshgrid(h0, w0, False, device).reshape(1, h0 * w0, 2).repeat(N, 1, 1)
+    grid_pt0_i = scale0 * grid_pt0_c
+    grid_pt1_c = create_meshgrid(h1, w1, False, device).reshape(1, h1 * w1, 2).repeat(N, 1, 1)
+    grid_pt1_i = scale1 * grid_pt1_c
+
+    H_0to1 = data['homography_0to1'].to(grid_pt0_i.dtype)
+    if H_0to1.dim() == 2:
+        H_0to1 = H_0to1[None].expand(N, -1, -1)
+
+    w_pt0_i, valid_h = _warp_pts_homography(grid_pt0_i, H_0to1)
+    w_pt0_c = w_pt0_i / scale1
+
+    w_pt0_c_round = w_pt0_c.round()
+    if config.LOFTR.LOSS.COARSE_OVERLAP_WEIGHT:
+        w_pt0_c_error = (1.0 - 2 * torch.abs(w_pt0_c - w_pt0_c_round)).prod(-1)
+    w_pt0_c_round = w_pt0_c_round.long()
+
+    out_of_bound = (
+        (w_pt0_c_round[..., 0] < 0) | (w_pt0_c_round[..., 0] >= w1)
+        | (w_pt0_c_round[..., 1] < 0) | (w_pt0_c_round[..., 1] >= h1)
+    )
+    valid = valid_h & (~out_of_bound)
+
+    # Compute the index used to look up coarse cells in image1, clamping
+    # out-of-bound positions to a safe value so the gather below cannot crash.
+    # Cells that are still flagged invalid by ``valid`` are zeroed out
+    # immediately after the gather, so the clamped lookups never affect the
+    # produced supervision.
+    nearest_index1 = (
+        w_pt0_c_round[..., 0].clamp(0, w1 - 1)
+        + w_pt0_c_round[..., 1].clamp(0, h1 - 1) * w1
+    )
+
+    # When the dataset provides padding masks (RoadScene A3 pipeline),
+    # additionally require that:
+    #   - the source IR coarse cell is real (mask0)
+    #   - the projected VIS coarse cell is real (mask1 looked up at nearest_index1)
+    # so we never supervise against zero-padded regions.
+    if 'mask0' in data and 'mask1' in data:
+        mask0_flat = data['mask0'].reshape(N, -1)              # [N, h0*w0]
+        mask1_flat = data['mask1'].reshape(N, -1)              # [N, h1*w1]
+        valid = valid & mask0_flat
+        target_valid = mask1_flat.gather(1, nearest_index1)
+        valid = valid & target_valid
+
+    nearest_index1[~valid] = 0
+
+    conf_matrix_gt = torch.zeros(N, h0 * w0, h1 * w1, device=device)
+    b_ids, i_ids = torch.where(valid)
+    j_ids = nearest_index1[b_ids, i_ids]
+    conf_matrix_gt[b_ids, i_ids, j_ids] = 1
+    data.update({'conf_matrix_gt': conf_matrix_gt})
+
+    if config.LOFTR.LOSS.COARSE_OVERLAP_WEIGHT:
+        conf_matrix_error_gt = w_pt0_c_error[b_ids, i_ids]
+        data.update({'conf_matrix_error_gt': conf_matrix_error_gt})
+
+    if len(b_ids) == 0:
+        loguru_logger.warning(
+            f"No groundtruth coarse match found for: {data['pair_names']}")
+        b_ids = torch.tensor([0], device=device)
+        i_ids = torch.tensor([0], device=device)
+        j_ids = torch.tensor([0], device=device)
+
+    data.update({
+        'spv_b_ids': b_ids,
+        'spv_i_ids': i_ids,
+        'spv_j_ids': j_ids,
+    })
+    data.update({
+        'spv_w_pt0_i': w_pt0_i,
+        'spv_pt1_i': grid_pt1_i,
+    })
+
+
 def compute_supervision_coarse(data, config):
     assert len(set(data['dataset_name'])) == 1, "Do not support mixed datasets training!"
     data_source = data['dataset_name'][0]
     if data_source.lower() in ['scannet', 'megadepth']:
         spvs_coarse(data, config)
+    elif data_source.lower() == 'roadscene':
+        spvs_coarse_roadscene(data, config)
     else:
         raise ValueError(f'Unknown data source: {data_source}')
 
@@ -267,9 +382,126 @@ def spvs_fine(data, config, logger = None):
         if  conf_matrix_f_gt.sum() == 0:
             loguru_logger.info(f'no fine matches to supervise')
                 
+@torch.no_grad()
+def spvs_fine_roadscene(data, config, logger=None):
+    """Homography-aware fine-level supervision for RoadScene.
+
+    Mirrors :func:`spvs_fine` but replaces depth/pose-based warping with the
+    per-pair Homography in ``data['homography_0to1']``.
+    """
+    pt1_i = data['spv_pt1_i']
+    W = config['LOFTR']['FINE_WINDOW_SIZE']
+    WW = W * W
+    scale = config['LOFTR']['RESOLUTION'][1]
+    device = data['image0'].device
+    N, _, H0, W0 = data['image0'].shape
+    _, _, H1, W1 = data['image1'].shape
+    hf0, wf0, hf1, wf1 = data['hw0_f'][0], data['hw0_f'][1], data['hw1_f'][0], data['hw1_f'][1]
+    assert not config.LOFTR.ALIGN_CORNER, 'only support training with align_corner=False for now.'
+
+    b_ids, i_ids, j_ids = data['b_ids'], data['i_ids'], data['j_ids']
+    scalei0 = scale * data['scale0'][b_ids] if 'scale0' in data else scale
+    scalei1 = scale * data['scale1'][b_ids] if 'scale1' in data else scale
+
+    m = b_ids.shape[0]
+    if m == 0:
+        conf_matrix_f_gt = torch.zeros(m, WW, WW, device=device)
+        data.update({'conf_matrix_f_gt': conf_matrix_f_gt})
+        if config.LOFTR.LOSS.FINE_OVERLAP_WEIGHT:
+            data.update({'conf_matrix_f_error_gt': torch.zeros(1, device=device)})
+        data.update({'expec_f': torch.zeros(1, 2, device=device)})
+        data.update({'expec_f_gt': torch.zeros(1, 2, device=device)})
+        return
+
+    grid_pt0_f = create_meshgrid(hf0, wf0, False, device) - W // 2 + 0.5  # [1, hf0, wf0, 2]
+    grid_pt0_f = rearrange(grid_pt0_f, 'n h w c -> n c h w')
+    if config.LOFTR.ALIGN_CORNER is False:
+        assert W == 8
+        grid_pt0_f_unfold = F.unfold(grid_pt0_f, kernel_size=(W, W), stride=W, padding=0)
+    grid_pt0_f_unfold = rearrange(grid_pt0_f_unfold, 'n (c ww) l -> n l ww c', ww=W ** 2)
+    grid_pt0_f_unfold = repeat(grid_pt0_f_unfold[0], 'l ww c -> N l ww c', N=N)
+
+    grid_pt0_f_unfold = grid_pt0_f_unfold[data['b_ids'], data['i_ids']]   # [m, ww, 2]
+    grid_pt0_f_unfold = scalei0[:, None, :] * grid_pt0_f_unfold
+
+    H_0to1 = data['homography_0to1'].to(grid_pt0_f_unfold.dtype)
+    if H_0to1.dim() == 2:
+        H_0to1 = H_0to1[None].expand(N, -1, -1)
+
+    correct_0to1_f = torch.zeros(m, WW, device=device, dtype=torch.bool)
+    w_pt0_i = torch.zeros(m, WW, 2, device=device, dtype=torch.float32)
+    for b in range(N):
+        mask = b_ids == b
+        match = int(mask.sum())
+        if match == 0:
+            continue
+        pts = grid_pt0_f_unfold[mask].reshape(1, -1, 2)
+        warped, valid = _warp_pts_homography(pts, H_0to1[[b], ...])
+        # Warped point must also fall inside the image1 area to be a usable supervision.
+        in_bound = (
+            (warped[..., 0] >= 0) & (warped[..., 0] < W1)
+            & (warped[..., 1] >= 0) & (warped[..., 1] < H1)
+        )
+        valid = valid & in_bound
+        correct_0to1_f[mask] = valid.reshape(match, WW)
+        w_pt0_i[mask] = warped.reshape(match, WW, 2)
+
+    delta_w_pt0_i = w_pt0_i - pt1_i[b_ids, j_ids][:, None, :]
+    del b_ids, i_ids, j_ids
+    delta_w_pt0_f = delta_w_pt0_i / scalei1[:, None, :] + W // 2 - 0.5
+    delta_w_pt0_f_round = delta_w_pt0_f.round()
+    if config.LOFTR.LOSS.FINE_OVERLAP_WEIGHT:
+        w_pt0_f_error = (1.0 - 2 * torch.abs(delta_w_pt0_f - delta_w_pt0_f_round)).prod(-1)
+    delta_w_pt0_f_round = delta_w_pt0_f_round.long()
+
+    nearest_index1 = delta_w_pt0_f_round[..., 0] + delta_w_pt0_f_round[..., 1] * W
+
+    def out_bound_mask(pt, w, h):
+        return (pt[..., 0] < 0) + (pt[..., 0] >= w) + (pt[..., 1] < 0) + (pt[..., 1] >= h)
+    ob_mask = out_bound_mask(delta_w_pt0_f_round, W, W)
+    nearest_index1[ob_mask] = 0
+    correct_0to1_f[ob_mask] = 0
+
+    m_ids, i_ids = torch.where(correct_0to1_f != 0)
+    j_ids = nearest_index1[m_ids, i_ids]
+    j_ids_di, j_ids_dj = j_ids // W, j_ids % W
+    m_ids = m_ids.to(torch.long)
+    i_ids = i_ids.to(torch.long)
+    j_ids_di = j_ids_di.to(torch.long)
+    j_ids_dj = j_ids_dj.to(torch.long)
+
+    expec_f_gt = delta_w_pt0_f - delta_w_pt0_f_round.float()
+    if m_ids.numel() == 0:
+        loguru_logger.warning(
+            f"No groundtruth fine match found for local regress: {data['pair_names']}")
+        data.update({'expec_f': torch.zeros(1, 2, device=device)})
+        data.update({'expec_f_gt': torch.zeros(1, 2, device=device)})
+    else:
+        expec_f_gt = expec_f_gt[m_ids, i_ids]
+        data.update({'expec_f_gt': expec_f_gt})
+        data.update({
+            'm_ids_f': m_ids,
+            'i_ids_f': i_ids,
+            'j_ids_f_di': j_ids_di,
+            'j_ids_f_dj': j_ids_dj,
+        })
+
+    conf_matrix_f_gt = torch.zeros(m, WW, WW, device=device, dtype=torch.bool)
+    conf_matrix_f_gt[m_ids, i_ids, j_ids] = 1
+    data.update({'conf_matrix_f_gt': conf_matrix_f_gt})
+    if config.LOFTR.LOSS.FINE_OVERLAP_WEIGHT:
+        w_pt0_f_error = w_pt0_f_error[m_ids, i_ids]
+        data.update({'conf_matrix_f_error_gt': w_pt0_f_error})
+
+    if conf_matrix_f_gt.sum() == 0:
+        loguru_logger.info('no fine matches to supervise')
+
+
 def compute_supervision_fine(data, config, logger=None):
     data_source = data['dataset_name'][0]
     if data_source.lower() in ['scannet', 'megadepth']:
         spvs_fine(data, config, logger)
+    elif data_source.lower() == 'roadscene':
+        spvs_fine_roadscene(data, config, logger)
     else:
         raise NotImplementedError

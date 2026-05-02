@@ -129,11 +129,38 @@ class LocalFeatureTransformer(nn.Module):
         feature_cropped = False
         if bs == 1 and mask0 is not None and mask1 is not None:
             mask_H0, mask_W0, mask_H1, mask_W1 = mask0.size(-2), mask0.size(-1), mask1.size(-2), mask1.size(-1)
-            mask_h0, mask_w0, mask_h1, mask_w1 = mask0[0].sum(-2)[0], mask0[0].sum(-1)[0], mask1[0].sum(-2)[0], mask1[0].sum(-1)[0]
-            mask_h0, mask_w0, mask_h1, mask_w1 = mask_h0//self.agg_size0*self.agg_size0, mask_w0//self.agg_size0*self.agg_size0, mask_h1//self.agg_size1*self.agg_size1, mask_w1//self.agg_size1*self.agg_size1
-            feat0 = feat0[:, :, :mask_h0, :mask_w0]
-            feat1 = feat1[:, :, :mask_h1, :mask_w1]
-            feature_cropped = True
+
+            # Bounding extent of the valid region per dim. The original
+            # ``mask0[0].sum(-2)[0]`` style only worked for top-left rectangular
+            # masks (MegaDepth / ScanNet); RoadScene Homography augmentation can
+            # produce non-rectangular masks where col 0 or row 0 has zero True
+            # cells, which would yield a 0-sized crop and crash the conv2d.
+            #
+            # ``any(dim).nonzero()[-1] + 1`` returns the smallest top-left
+            # bounding box that contains all True cells. For top-left
+            # rectangular masks this matches the previous expression exactly.
+            def _bound_extent(v):
+                if v.any():
+                    return int(v.nonzero()[-1].item()) + 1
+                return 0
+            mask_h0 = _bound_extent(mask0[0].any(dim=-1))
+            mask_w0 = _bound_extent(mask0[0].any(dim=-2))
+            mask_h1 = _bound_extent(mask1[0].any(dim=-1))
+            mask_w1 = _bound_extent(mask1[0].any(dim=-2))
+            mask_h0 = (mask_h0 // self.agg_size0) * self.agg_size0
+            mask_w0 = (mask_w0 // self.agg_size0) * self.agg_size0
+            mask_h1 = (mask_h1 // self.agg_size1) * self.agg_size1
+            mask_w1 = (mask_w1 // self.agg_size1) * self.agg_size1
+
+            # Skip the cropping optimisation when any cropped dim becomes
+            # smaller than the aggregator's kernel (e.g. agg_size = 4). This
+            # keeps the conv path safe for extreme Homography cases or very
+            # narrow images while preserving the perf win in the common case.
+            if (mask_h0 >= self.agg_size0 and mask_w0 >= self.agg_size0
+                    and mask_h1 >= self.agg_size1 and mask_w1 >= self.agg_size1):
+                feat0 = feat0[:, :, :mask_h0, :mask_w0]
+                feat1 = feat1[:, :, :mask_h1, :mask_w1]
+                feature_cropped = True
 
         for i, (layer, name) in enumerate(zip(self.layers, self.layer_names)):
             if feature_cropped:
@@ -148,17 +175,24 @@ class LocalFeatureTransformer(nn.Module):
                 raise KeyError
 
         if feature_cropped:
-            # padding feature
+            # Pad cropped features back to the original (mask_H, mask_W) so that
+            # downstream coarse-matching sees the full canvas. The original code
+            # used `elif` and `mask_W0` (full width), which only handled the
+            # MegaDepth case where exactly ONE of (H, W) was padded. RoadScene
+            # resizes IR and VIS independently so BOTH dimensions can be smaller
+            # than the canvas; we therefore use two `if`s and the *current*
+            # cropped width when padding height, then the full height when
+            # padding width.
             bs, c, mask_h0, mask_w0 = feat0.size()
             if mask_h0 != mask_H0:
-                feat0 = torch.cat([feat0, torch.zeros(bs, c, mask_H0-mask_h0, mask_W0, device=feat0.device, dtype=feat0.dtype)], dim=-2)
-            elif mask_w0 != mask_W0:
+                feat0 = torch.cat([feat0, torch.zeros(bs, c, mask_H0-mask_h0, mask_w0, device=feat0.device, dtype=feat0.dtype)], dim=-2)
+            if mask_w0 != mask_W0:
                 feat0 = torch.cat([feat0, torch.zeros(bs, c, mask_H0, mask_W0-mask_w0, device=feat0.device, dtype=feat0.dtype)], dim=-1)
 
             bs, c, mask_h1, mask_w1 = feat1.size()
             if mask_h1 != mask_H1:
-                feat1 = torch.cat([feat1, torch.zeros(bs, c, mask_H1-mask_h1, mask_W1, device=feat1.device, dtype=feat1.dtype)], dim=-2)
-            elif mask_w1 != mask_W1:
+                feat1 = torch.cat([feat1, torch.zeros(bs, c, mask_H1-mask_h1, mask_w1, device=feat1.device, dtype=feat1.dtype)], dim=-2)
+            if mask_w1 != mask_W1:
                 feat1 = torch.cat([feat1, torch.zeros(bs, c, mask_H1, mask_W1-mask_w1, device=feat1.device, dtype=feat1.dtype)], dim=-1)
 
         return feat0, feat1

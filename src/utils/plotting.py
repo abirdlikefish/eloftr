@@ -11,6 +11,9 @@ def _compute_conf_thresh(data):
         thr = 5e-4
     elif dataset_name == 'megadepth':
         thr = 1e-4
+    elif dataset_name == 'roadscene':
+        # interpreted as a pixel threshold for the visualization colormap
+        thr = 3.0
     else:
         raise ValueError(f'Unknown dataset: {dataset_name}')
     return thr
@@ -70,17 +73,17 @@ def _make_evaluation_figure(data, b_id, alpha='dynamic'):
     b_mask = data['m_bids'] == b_id
     conf_thr = _compute_conf_thresh(data)
     
-    img0 = (data['image0'][b_id][0].cpu().numpy() * 255).round().astype(np.int32)
-    img1 = (data['image1'][b_id][0].cpu().numpy() * 255).round().astype(np.int32)
-    kpts0 = data['mkpts0_f'][b_mask].cpu().numpy()
-    kpts1 = data['mkpts1_f'][b_mask].cpu().numpy()
+    img0 = (data['image0'][b_id][0].detach().cpu().numpy() * 255).round().astype(np.int32)
+    img1 = (data['image1'][b_id][0].detach().cpu().numpy() * 255).round().astype(np.int32)
+    kpts0 = data['mkpts0_f'][b_mask].detach().cpu().numpy()
+    kpts1 = data['mkpts1_f'][b_mask].detach().cpu().numpy()
     
     # for megadepth, we visualize matches on the resized image
     if 'scale0' in data:
-        kpts0 = kpts0 / data['scale0'][b_id].cpu().numpy()[[1, 0]]
-        kpts1 = kpts1 / data['scale1'][b_id].cpu().numpy()[[1, 0]]
+        kpts0 = kpts0 / data['scale0'][b_id].detach().cpu().numpy()[[1, 0]]
+        kpts1 = kpts1 / data['scale1'][b_id].detach().cpu().numpy()[[1, 0]]
 
-    epi_errs = data['epi_errs'][b_mask].cpu().numpy()
+    epi_errs = data['epi_errs'][b_mask].detach().cpu().numpy()
     correct_mask = epi_errs < conf_thr
     precision = np.mean(correct_mask) if len(correct_mask) > 0 else 0
     n_correct = np.sum(correct_mask)
@@ -105,6 +108,37 @@ def _make_evaluation_figure(data, b_id, alpha='dynamic'):
                                   color, text=text)
     return figure
 
+def _make_evaluation_figure_roadscene(data, b_id, alpha='dynamic'):
+    """RoadScene evaluation figure using pixel error against H-projected GT."""
+    b_mask = data['m_bids'] == b_id
+    conf_thr = _compute_conf_thresh(data)
+
+    img0 = (data['image0'][b_id][0].detach().cpu().numpy() * 255).round().astype(np.int32)
+    img1 = (data['image1'][b_id][0].detach().cpu().numpy() * 255).round().astype(np.int32)
+    kpts0 = data['mkpts0_f'][b_mask].detach().cpu().numpy()
+    kpts1 = data['mkpts1_f'][b_mask].detach().cpu().numpy()
+
+    if 'pixel_errs' in data:
+        pixel_errs = data['pixel_errs'][b_mask].detach().cpu().numpy()
+    else:
+        pixel_errs = np.linalg.norm(kpts0 - kpts1, axis=-1) if len(kpts0) else np.zeros(0)
+
+    correct_mask = pixel_errs < conf_thr
+    precision = np.mean(correct_mask) if len(correct_mask) > 0 else 0
+    n_correct = int(np.sum(correct_mask))
+
+    if alpha == 'dynamic':
+        alpha = dynamic_alpha(len(correct_mask))
+    color = error_colormap(pixel_errs, conf_thr, alpha=alpha)
+
+    text = [
+        f'#Matches {len(kpts0)}',
+        f'Precision@{conf_thr:.0f}px: {100 * precision:.1f}% ({n_correct}/{len(kpts0)})',
+        f'Mean px err: {pixel_errs.mean():.2f}' if len(pixel_errs) else 'Mean px err: -',
+    ]
+    return make_matching_figure(img0, img1, kpts0, kpts1, color, text=text)
+
+
 def _make_confidence_figure(data, b_id):
     # TODO: Implement confidence figure
     raise NotImplementedError()
@@ -120,11 +154,17 @@ def make_matching_figures(data, config, mode='evaluation'):
     """
     assert mode in ['evaluation', 'confidence', 'gt']  # 'confidence'
     figures = {mode: []}
+    is_roadscene = data['dataset_name'][0].lower() == 'roadscene'
     for b_id in range(data['image0'].size(0)):
         if mode == 'evaluation':
-            fig = _make_evaluation_figure(
-                data, b_id,
-                alpha=config.TRAINER.PLOT_MATCHES_ALPHA)
+            if is_roadscene:
+                fig = _make_evaluation_figure_roadscene(
+                    data, b_id,
+                    alpha=config.TRAINER.PLOT_MATCHES_ALPHA)
+            else:
+                fig = _make_evaluation_figure(
+                    data, b_id,
+                    alpha=config.TRAINER.PLOT_MATCHES_ALPHA)
         elif mode == 'confidence':
             fig = _make_confidence_figure(data, b_id)
         else:

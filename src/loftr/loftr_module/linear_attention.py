@@ -14,19 +14,42 @@ if hasattr(F, 'scaled_dot_product_attention'):
 else:
     FLASH_AVAILABLE = False
 
+def _bound_extent(v):
+    """Return ``last_true_index + 1`` as the bounding extent of a 1-D bool
+    tensor (or 0 if no True). For top-left rectangular masks this matches
+    ``v.sum()``; for non-rectangular masks (e.g. produced by Homography
+    augmentation in RoadScene) it gives the smallest top-left bounding box
+    that still contains every True cell.
+    """
+    if v.any():
+        return int(v.nonzero()[-1].item()) + 1
+    return 0
+
+
 def crop_feature(query, key, value, x_mask, source_mask):
-    mask_h0, mask_w0, mask_h1, mask_w1 = x_mask[0].sum(-2)[0], x_mask[0].sum(-1)[0], source_mask[0].sum(-2)[0], source_mask[0].sum(-1)[0]
+    # Bounding extent rather than ``mask[0].sum(-2)[0]``: the latter only
+    # works when the valid region is a top-left rectangle, which RoadScene's
+    # Homography-augmented masks violate.
+    mask_h0 = _bound_extent(x_mask[0].any(dim=-1))
+    mask_w0 = _bound_extent(x_mask[0].any(dim=-2))
+    mask_h1 = _bound_extent(source_mask[0].any(dim=-1))
+    mask_w1 = _bound_extent(source_mask[0].any(dim=-2))
     query = query[:, :mask_h0, :mask_w0, :]
     key = key[:, :mask_h1, :mask_w1, :]
     value = value[:, :mask_h1, :mask_w1, :]
     return query, key, value, mask_h0, mask_w0
 
+
 def pad_feature(m, mask_h0, mask_w0, x_mask):
+    # Two ``if``s (not ``elif``) and use the *current* width when padding
+    # height, then the full height when padding width. The original
+    # ``elif``+``x_mask.size(-1)`` only worked when exactly one dim was
+    # padded (MegaDepth case).
     bs, L, H, D = m.size()
     m = m.view(bs, mask_h0, mask_w0, H, D)
     if mask_h0 != x_mask.size(-2):
-        m = torch.cat([m, torch.zeros(m.size(0), x_mask.size(-2)-mask_h0, x_mask.size(-1), H, D, device=m.device, dtype=m.dtype)], dim=1)
-    elif mask_w0 != x_mask.size(-1):
+        m = torch.cat([m, torch.zeros(m.size(0), x_mask.size(-2)-mask_h0, mask_w0, H, D, device=m.device, dtype=m.dtype)], dim=1)
+    if mask_w0 != x_mask.size(-1):
         m = torch.cat([m, torch.zeros(m.size(0), x_mask.size(-2), x_mask.size(-1)-mask_w0, H, D, device=m.device, dtype=m.dtype)], dim=2)
     return m
 
