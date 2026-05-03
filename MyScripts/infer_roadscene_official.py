@@ -23,7 +23,7 @@ def resize_to_divisible_by_32(img0, img1):
 
 def main():
     ir_dir = Path("data/RoadScene/cropinfrared")
-    vis_dir = Path("data/RoadScene/crop_HR_visible")
+    vis_dir = Path("data/RoadScene/crop_LR_visible")
     ckpt_path = Path("weights/eloftr_outdoor.ckpt")
     out_dir = Path("dump/roadscene_official")
     out_dir.mkdir(parents=True, exist_ok=True)

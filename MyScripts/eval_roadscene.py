@@ -1,171 +1,350 @@
-"""Independent RoadScene evaluation script.
+"""Independent RoadScene evaluation script (training-val parity).
 
-Used to compare an EfficientLoFTR checkpoint (official or finetuned) on the
-RoadScene IR-VIS test split using a pixel-error metric. Designed to be the
-post-training counterpart of ``infer_roadscene_official.py`` and to NOT depend
-on ``test.py`` (which assumes ScanNet/MegaDepth-style camera geometry).
+Replaces the older "manual preprocess" path with one that *exactly* mirrors
+the training-time validation pipeline. Concretely, this script:
 
-For each pair in ``test_pairs.txt``:
+  1. Loads the same yacs config as training (default
+     ``configs/loftr/eloftr_full.py`` + ``configs/data/roadscene_trainval.py``,
+     overridable via ``--main_cfg`` / ``--data_cfg``). This means LoFTR is
+     built with the SAME architecture as training, including any optional
+     extras the trained ckpt expects (``USE_MODALITY_EMB``,
+     ``USE_CONTRASTIVE``, ``MP``, ``THR``, ``NPE``, ...).
 
-  1. Load IR + VIS, resize to a common (H, W) divisible by 32.
-  2. Optionally apply a deterministic random Homography to VIS.
-  3. Run the matcher in eval mode.
-  4. Compute pixel error: when no Homography, ``||mkpts0_f - mkpts1_f||``;
-     otherwise ``||H @ mkpts0_f - mkpts1_f||``.
+  2. Builds a real ``RoadSceneDataset`` + ``DataLoader(bs=1, shuffle=False)``
+     so each batch goes through the same independent-IR/VIS resize, square
+     zero-padding, and mask0/mask1 generation as training validation.
 
-Outputs a per-pair CSV (``summary.csv``) and visualisation images.
+  3. Does **not** call ``reparameter()``. Training validation runs the
+     RepVGG backbone in its multi-branch ("training") form, so eval here
+     does the same to match numerics.
+
+  4. Computes pixel error using ``batch['homography_0to1']`` exactly as
+     ``PL_LoFTR._compute_roadscene_metrics`` does.
+
+  5. Aggregates ``precision@Npx`` per-match across all pairs (matching
+     ``PL_LoFTR._aggregate_roadscene_metrics``). Per-pair numbers are also
+     written to ``summary.csv`` for inspection.
+
+The CLI is backwards-compatible with the previous version (same flags,
+same output layout). Two new flags:
+
+    --main_cfg   path to the LoFTR yacs config used at training
+    --data_cfg   path to the RoadScene data yacs config
+
+Use the same configs you trained with so the matcher class matches the
+ckpt -- mismatch only shows up as ``missing_keys`` warnings on load.
+
+The legacy ``--apply_homography`` flag still works: it switches the
+dataset to ``mode='train'`` so the train-time Homography augmentation
+fires. ``np.random.seed`` is called once with ``--seed`` for partial
+reproducibility (full reproducibility is hard because every worker
+re-seeds; we therefore force ``num_workers=0`` whenever Homography aug
+is requested).
 """
 from __future__ import annotations
 
 import argparse
 import csv
-from copy import deepcopy
 from pathlib import Path
+from typing import Dict, List
 
 import cv2
 import matplotlib.cm as cm
 import numpy as np
 import torch
+from torch.utils.data import DataLoader
 
-from src.datasets.roadscene import _random_homography
-from src.loftr import LoFTR, full_default_cfg, reparameter
+from src.config.default import get_cfg_defaults
+from src.datasets.roadscene import RoadSceneDataset
+from src.loftr import LoFTR
+from src.utils.misc import lower_config
 from src.utils.plotting import make_matching_figure
 
 
+# --------------------------------------------------------------------------- #
+# CLI
+# --------------------------------------------------------------------------- #
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__,
-                                     formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--ckpt", required=True,
-                        help="Path to checkpoint (.ckpt). Official or finetuned.")
-    parser.add_argument("--root", default="data/RoadScene",
-                        help="RoadScene root directory.")
-    parser.add_argument("--ir_subdir", default="cropinfrared")
-    parser.add_argument("--vis_subdir", default="crop_HR_visible")
-    parser.add_argument("--list_path", default="data/RoadScene/index/test_pairs.txt",
-                        help="Plain-text list of paired filenames (one per line).")
-    parser.add_argument("--out_dir", required=True,
-                        help="Directory for visualisations and summary.csv.")
-    parser.add_argument("--img_resize", type=int, default=480,
-                        help="Longer-edge target before df-rounding.")
-    parser.add_argument("--df", type=int, default=32,
-                        help="Final H, W are multiples of df.")
-    parser.add_argument("--max_pairs", type=int, default=0,
-                        help="Limit to N pairs (0 = all).")
-    parser.add_argument("--apply_homography", action="store_true",
-                        help="Apply a random Homography to VIS at evaluation time.")
-    parser.add_argument("--seed", type=int, default=123,
-                        help="Seed for the deterministic Homography generator.")
-    parser.add_argument("--thresholds", type=float, nargs="+",
-                        default=[1.0, 3.0, 5.0],
-                        help="Pixel thresholds for precision@Npx.")
-    parser.add_argument("--save_figures", action="store_true", default=True,
-                        help="Save per-pair match visualisations.")
-    parser.add_argument("--no_save_figures", dest="save_figures",
-                        action="store_false")
-    parser.add_argument("--device", default="cuda")
-    parser.add_argument("--thr", type=float, default=0.1,
-                        help="Coarse-matching confidence threshold.")
-    return parser.parse_args()
+    p = argparse.ArgumentParser(description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--ckpt", required=True,
+                   help="Path to checkpoint (.ckpt). Official or PL-trained.")
+    p.add_argument("--main_cfg", default="configs/loftr/eloftr_full.py",
+                   help="LoFTR yacs config used at training.")
+    p.add_argument("--data_cfg", default="configs/data/roadscene_trainval.py",
+                   help="Data yacs config used at training.")
+    p.add_argument("--out_dir", required=True,
+                   help="Directory for visualisations, summary.csv and overall.txt.")
+    # Optional dataset overrides; if not set, taken from data_cfg.
+    p.add_argument("--list_path", default=None,
+                   help="Override the index file (default: TEST_LIST_PATH from data_cfg).")
+    p.add_argument("--root", default=None, help="Override root_dir.")
+    p.add_argument("--ir_subdir", default=None, help="Override IR sub-dir.")
+    p.add_argument("--vis_subdir", default=None, help="Override VIS sub-dir.")
+    # Behaviour knobs.
+    p.add_argument("--max_pairs", type=int, default=0,
+                   help="Limit to N pairs (0 = all).")
+    p.add_argument("--apply_homography", action="store_true",
+                   help="Run dataset in train-mode so the random Homography "
+                        "augmentation fires. Default: off (matches training val).")
+    p.add_argument("--seed", type=int, default=123,
+                   help="np.random seed used when --apply_homography is set.")
+    p.add_argument("--thresholds", type=float, nargs="+", default=[1.0, 3.0, 5.0])
+    p.add_argument("--save_figures", action="store_true", default=True)
+    p.add_argument("--no_save_figures", dest="save_figures", action="store_false")
+    p.add_argument("--device", default="cuda")
+    p.add_argument("--thr", type=float, default=None,
+                   help="Override LOFTR.MATCH_COARSE.THR.")
+    p.add_argument("--num_workers", type=int, default=0)
+    return p.parse_args()
 
 
-def _read_index(path: str) -> list[str]:
-    with open(path, "r", encoding="utf-8") as f:
-        return [l.strip() for l in f.readlines() if l.strip()]
+# --------------------------------------------------------------------------- #
+# Config + model
+# --------------------------------------------------------------------------- #
+def build_config(args: argparse.Namespace):
+    """Reproduce the relevant slice of train.py's config-building."""
+    cfg = get_cfg_defaults()
+    cfg.merge_from_file(args.main_cfg)
+    cfg.merge_from_file(args.data_cfg)
+
+    if cfg.LOFTR.COARSE.NPE is None:
+        cfg.LOFTR.COARSE.NPE = [832, 832, 832, 832]
+
+    # Match the training command line: --disable_mp was always passed for
+    # RoadScene runs, so MP=False. Forcing it here keeps the autocast/fp32
+    # path identical to validation_step.
+    cfg.LOFTR.MP = False
+    cfg.LOFTR.HALF = False
+
+    if args.thr is not None:
+        cfg.LOFTR.MATCH_COARSE.THR = float(args.thr)
+    return cfg
 
 
-def _resize_pair(ir: np.ndarray, vis: np.ndarray, img_resize: int, df: int):
-    h0, w0 = ir.shape
-    h1, w1 = vis.shape
-    scale = float(img_resize) / max(min(h0, h1), min(w0, w1))
-    h_new = int(round(min(h0, h1) * scale))
-    w_new = int(round(min(w0, w1) * scale))
-    h_new = max(df, (h_new // df) * df)
-    w_new = max(df, (w_new // df) * df)
-    ir_r = cv2.resize(ir, (w_new, h_new))
-    vis_r = cv2.resize(vis, (w_new, h_new))
-    return ir_r, vis_r, (h_new, w_new)
+def _strip_matcher_prefix(state_dict: Dict[str, torch.Tensor]):
+    """PL ckpts save the full LightningModule state_dict, where every LoFTR
+    parameter is prefixed with ``matcher.`` (and the loss buffers live under
+    ``loss.``). The official released ``eloftr_outdoor.ckpt`` is already a
+    bare LoFTR state_dict with no prefix. Handle both."""
+    if not any(k.startswith("matcher.") for k in state_dict):
+        return state_dict
+    cleaned = {}
+    for k, v in state_dict.items():
+        if k.startswith("matcher."):
+            cleaned[k[len("matcher."):]] = v
+        # Drop loss.*, etc. They don't belong to the LoFTR matcher.
+    return cleaned
 
 
-def _apply_h_to_pts(pts: np.ndarray, H: np.ndarray) -> np.ndarray:
-    if len(pts) == 0:
-        return pts
-    pts_h = np.concatenate([pts, np.ones((pts.shape[0], 1))], axis=1)
-    warped = pts_h @ H.T
-    warped = warped[:, :2] / np.clip(warped[:, 2:3], 1e-8, None)
-    return warped
+def build_matcher(cfg, ckpt_path: Path, device: str) -> LoFTR:
+    _cfg = lower_config(cfg)
+    matcher = LoFTR(config=_cfg["loftr"])
+
+    ckpt = torch.load(str(ckpt_path), map_location="cpu", weights_only=False)
+    state_dict = ckpt["state_dict"] if "state_dict" in ckpt else ckpt
+    state_dict = _strip_matcher_prefix(state_dict)
+    msg = matcher.load_state_dict(state_dict, strict=False)
+    if msg.missing_keys:
+        print(f"  [load] missing_keys ({len(msg.missing_keys)}): "
+              f"{msg.missing_keys[:6]}{' ...' if len(msg.missing_keys) > 6 else ''}")
+    if msg.unexpected_keys:
+        print(f"  [load] unexpected_keys ({len(msg.unexpected_keys)}): "
+              f"{msg.unexpected_keys[:6]}{' ...' if len(msg.unexpected_keys) > 6 else ''}")
+
+    matcher = matcher.eval().to(device)
+    return matcher
 
 
+# --------------------------------------------------------------------------- #
+# Dataset
+# --------------------------------------------------------------------------- #
+def build_dataset(cfg, args: argparse.Namespace) -> RoadSceneDataset:
+    ds_cfg = cfg.DATASET
+    root = args.root or ds_cfg.TEST_DATA_ROOT or ds_cfg.VAL_DATA_ROOT
+    list_path = args.list_path or ds_cfg.TEST_LIST_PATH or ds_cfg.VAL_LIST_PATH
+    ir_subdir = args.ir_subdir or getattr(ds_cfg, "ROAD_IR_SUBDIR", "cropinfrared")
+    vis_subdir = args.vis_subdir or getattr(ds_cfg, "ROAD_VIS_SUBDIR", "crop_LR_visible")
+
+    img_resize = getattr(ds_cfg, "ROAD_IMG_RESIZE", 480)
+    df = getattr(ds_cfg, "ROAD_DF", 32)
+    pad_size = getattr(ds_cfg, "ROAD_PAD_SIZE", None)
+    coarse_scale = 1.0 / cfg.LOFTR.RESOLUTION[0]
+
+    if args.apply_homography:
+        # Engage the dataset's train-time augmentation path. mode='train'
+        # is required so the augment_fn / homography_aug branches are taken.
+        mode = "train"
+        homography_aug = True
+        np.random.seed(args.seed)
+    else:
+        mode = "val"
+        homography_aug = False
+
+    return RoadSceneDataset(
+        root_dir=root,
+        list_path=list_path,
+        mode=mode,
+        ir_subdir=ir_subdir,
+        vis_subdir=vis_subdir,
+        img_resize=img_resize,
+        pad_size=pad_size,
+        df=df,
+        coarse_scale=coarse_scale,
+        homography_aug=homography_aug,
+        homography_prob=getattr(ds_cfg, "ROAD_HOMOGRAPHY_PROB", 1.0),
+        homography_kwargs=dict(getattr(ds_cfg, "ROAD_HOMOGRAPHY_KWARGS", {})),
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Pixel error (mirror of PL_LoFTR._compute_roadscene_metrics)
+# --------------------------------------------------------------------------- #
+def _compute_pair_pixel_errs(batch: dict) -> np.ndarray:
+    mkpts0 = batch["mkpts0_f"]
+    mkpts1 = batch["mkpts1_f"]
+    if mkpts0.shape[0] == 0:
+        return np.zeros(0, dtype=np.float32)
+
+    if "homography_0to1" in batch:
+        H = batch["homography_0to1"].to(mkpts0.dtype)
+        if H.dim() == 3:           # [B, 3, 3] -> assume B=1 here
+            H = H[0]
+        ones = torch.ones(mkpts0.size(0), 1, dtype=mkpts0.dtype, device=mkpts0.device)
+        pts_h = torch.cat([mkpts0, ones], dim=-1)[..., None]   # [M, 3, 1]
+        warped_h = (H[None] @ pts_h).squeeze(-1)               # [M, 3]
+        warped = warped_h[..., :2] / warped_h[..., 2:3].clamp(min=1e-8)
+        errs = torch.linalg.norm(warped - mkpts1, dim=-1)
+    else:
+        errs = torch.linalg.norm(mkpts0 - mkpts1, dim=-1)
+    return errs.detach().cpu().numpy().astype(np.float32)
+
+
+# --------------------------------------------------------------------------- #
+# Visualisation helpers
+# --------------------------------------------------------------------------- #
+def _crop_to_valid(image: torch.Tensor, mask: torch.Tensor):
+    """``image`` is the padded canvas tensor (1, P, P) in [0, 1]. ``mask`` is
+    the COARSE-scale mask (Hc, Wc) returned by RoadSceneDataset. We upsample
+    the mask back to canvas size, find the bounding box of valid cells and
+    return the cropped image (H_r, W_r) as a uint8 numpy array."""
+    img = (image[0].detach().cpu().numpy() * 255.0).astype(np.uint8)
+    P = img.shape[-1]
+    m = mask.detach().cpu().numpy().astype(bool)
+    # Upsample mask to canvas resolution by Kronecker product.
+    scale = P // m.shape[-1] if m.shape[-1] else 1
+    if scale > 1:
+        m_full = np.kron(m, np.ones((scale, scale), dtype=bool))[:P, :P]
+    else:
+        m_full = m
+    if not m_full.any():
+        return img, (0, P, 0, P)
+    rows = np.where(m_full.any(axis=1))[0]
+    cols = np.where(m_full.any(axis=0))[0]
+    r0, r1 = int(rows[0]), int(rows[-1]) + 1
+    c0, c1 = int(cols[0]), int(cols[-1]) + 1
+    return img[r0:r1, c0:c1], (r0, r1, c0, c1)
+
+
+def _save_pair_figure(out_path: Path,
+                      batch: dict,
+                      pixel_errs: np.ndarray,
+                      thresholds: List[float],
+                      ckpt_name: str,
+                      pair_name: str,
+                      apply_homography: bool):
+    img0_crop, (r0_0, r1_0, c0_0, c1_0) = _crop_to_valid(batch["image0"][0], batch["mask0"][0])
+    img1_crop, (r0_1, r1_1, c0_1, c1_1) = _crop_to_valid(batch["image1"][0], batch["mask1"][0])
+    mkpts0 = batch["mkpts0_f"].detach().cpu().numpy()
+    mkpts1 = batch["mkpts1_f"].detach().cpu().numpy()
+
+    # Filter matches whose endpoints fall inside the cropped (valid) region
+    # AND offset coords so they line up with the cropped image.
+    keep = (
+        (mkpts0[:, 0] >= c0_0) & (mkpts0[:, 0] < c1_0) &
+        (mkpts0[:, 1] >= r0_0) & (mkpts0[:, 1] < r1_0) &
+        (mkpts1[:, 0] >= c0_1) & (mkpts1[:, 0] < c1_1) &
+        (mkpts1[:, 1] >= r0_1) & (mkpts1[:, 1] < r1_1)
+    ) if len(mkpts0) else np.zeros(0, dtype=bool)
+    mkpts0_v = mkpts0[keep] - np.array([c0_0, r0_0], dtype=mkpts0.dtype) if keep.any() else np.zeros((0, 2))
+    mkpts1_v = mkpts1[keep] - np.array([c0_1, r0_1], dtype=mkpts1.dtype) if keep.any() else np.zeros((0, 2))
+    errs_v = pixel_errs[keep] if keep.any() else np.zeros(0)
+
+    if len(errs_v):
+        color = cm.jet(np.clip(1.0 - errs_v / max(thresholds), 0.0, 1.0))
+    else:
+        color = np.zeros((0, 4))
+    p_at_3 = float((pixel_errs < 3.0).mean()) if len(pixel_errs) else 0.0
+    text = [
+        f"ckpt: {ckpt_name}",
+        f"#Matches {len(mkpts0)} (in-canvas: {int(keep.sum())})",
+        f"Mean px err: {float(pixel_errs.mean()) if len(pixel_errs) else 0.0:.2f}",
+        f"P@3px: {100 * p_at_3:.1f}%",
+        f"H aug: {'on' if apply_homography else 'off'}",
+        pair_name,
+    ]
+    fig = make_matching_figure(img0_crop, img1_crop, mkpts0_v, mkpts1_v, color, text=text)
+    fig.savefig(str(out_path), dpi=150, bbox_inches="tight")
+    import matplotlib.pyplot as plt
+    plt.close(fig)
+
+
+# --------------------------------------------------------------------------- #
+# Main
+# --------------------------------------------------------------------------- #
 def main() -> None:
     args = parse_args()
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-
-    ir_dir = Path(args.root) / args.ir_subdir
-    vis_dir = Path(args.root) / args.vis_subdir
     ckpt_path = Path(args.ckpt)
-    if not ir_dir.is_dir():
-        raise SystemExit(f"Cannot find IR directory: {ir_dir}")
-    if not vis_dir.is_dir():
-        raise SystemExit(f"Cannot find VIS directory: {vis_dir}")
     if not ckpt_path.is_file():
         raise SystemExit(f"Cannot find checkpoint: {ckpt_path}")
 
-    cfg = deepcopy(full_default_cfg)
-    cfg["match_coarse"]["thr"] = args.thr
-    matcher = LoFTR(config=cfg)
-    ckpt = torch.load(str(ckpt_path), map_location="cpu", weights_only=False)
-    state_dict = ckpt["state_dict"] if "state_dict" in ckpt else ckpt
-    matcher.load_state_dict(state_dict, strict=False)
-    matcher = reparameter(matcher).eval().to(args.device)
+    cfg = build_config(args)
+    matcher = build_matcher(cfg, ckpt_path, args.device)
+    dataset = build_dataset(cfg, args)
 
-    names = _read_index(args.list_path)
+    n_total = len(dataset)
     if args.max_pairs and args.max_pairs > 0:
-        names = names[: args.max_pairs]
-    print(f"Evaluating {len(names)} pairs with ckpt={ckpt_path}")
+        n_total = min(n_total, args.max_pairs)
+    print(f"Evaluating {n_total} pairs with ckpt={ckpt_path}")
+    print(f"  main_cfg : {args.main_cfg}")
+    print(f"  data_cfg : {args.data_cfg}")
+    print(f"  ir_dir   : {dataset.ir_dir}")
+    print(f"  vis_dir  : {dataset.vis_dir}")
+    print(f"  list     : {dataset.list_path}")
+    print(f"  H aug    : {bool(args.apply_homography)}")
+    print(f"  THR      : {cfg.LOFTR.MATCH_COARSE.THR}")
 
-    rng = np.random.default_rng(args.seed)
-    rows = []
-    all_errs: list[np.ndarray] = []
-    for idx, name in enumerate(names, start=1):
-        ir_path = ir_dir / name
-        vis_path = vis_dir / name
-        if not ir_path.exists() or not vis_path.exists():
-            print(f"[Skip] missing pair: {name}")
-            continue
-        ir_raw = cv2.imread(str(ir_path), cv2.IMREAD_GRAYSCALE)
-        vis_raw = cv2.imread(str(vis_path), cv2.IMREAD_GRAYSCALE)
-        if ir_raw is None or vis_raw is None:
-            print(f"[Skip] failed to read: {name}")
-            continue
-        ir, vis, (h, w) = _resize_pair(ir_raw, vis_raw, args.img_resize, args.df)
+    num_workers = 0 if args.apply_homography else int(args.num_workers)
+    loader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=num_workers)
 
-        H = np.eye(3, dtype=np.float32)
-        if args.apply_homography:
-            # Pick a deterministic-but-per-pair seed so different pairs see
-            # different Homographies but the run as a whole is reproducible.
-            local_rng = np.random.default_rng(args.seed + idx)
-            H = _random_homography(h, w, rng=local_rng)
-            vis = cv2.warpPerspective(vis, H, (w, h),
-                                      flags=cv2.INTER_LINEAR,
-                                      borderMode=cv2.BORDER_CONSTANT,
-                                      borderValue=0)
+    rows: List[dict] = []
+    all_errs: List[np.ndarray] = []
+    for idx, batch in enumerate(loader, start=1):
+        if args.max_pairs and idx > args.max_pairs:
+            break
 
-        img0 = torch.from_numpy(ir).float()[None][None].to(args.device) / 255.0
-        img1 = torch.from_numpy(vis).float()[None][None].to(args.device) / 255.0
-        batch = {"image0": img0, "image1": img1}
+        # Move tensors to device.
+        for k, v in batch.items():
+            if isinstance(v, torch.Tensor):
+                batch[k] = v.to(args.device, non_blocking=True)
+
         with torch.no_grad():
             matcher(batch)
 
-        mkpts0 = batch["mkpts0_f"].detach().cpu().numpy()
-        mkpts1 = batch["mkpts1_f"].detach().cpu().numpy()
-        mconf = batch["mconf"].detach().cpu().numpy()
+        pixel_errs = _compute_pair_pixel_errs(batch)
+        all_errs.append(pixel_errs)
 
-        warped = _apply_h_to_pts(mkpts0, H)
-        pixel_errs = np.linalg.norm(warped - mkpts1, axis=-1) if len(mkpts0) else np.zeros(0)
+        # pair_names is a tuple-of-tuples (one per side, each side is a tuple
+        # of length B=1) because of DataLoader collation.
+        ir_name = batch["pair_names"][0][0] if isinstance(batch["pair_names"][0], (list, tuple)) else batch["pair_names"][0]
+        pair_short = Path(str(ir_name)).name
 
+        mconf = batch["mconf"].detach().cpu().numpy() if "mconf" in batch else np.zeros(0)
         per_pair = {
-            "name": name,
-            "num_matches": int(len(mkpts0)),
+            "name": pair_short,
+            "num_matches": int(len(pixel_errs)),
             "mean_conf": float(mconf.mean()) if len(mconf) else 0.0,
             "median_conf": float(np.median(mconf)) if len(mconf) else 0.0,
             "max_conf": float(mconf.max()) if len(mconf) else 0.0,
@@ -176,27 +355,17 @@ def main() -> None:
                 float((pixel_errs < t).mean()) if len(pixel_errs) else 0.0
             )
         rows.append(per_pair)
-        all_errs.append(pixel_errs)
 
         if args.save_figures:
-            color = cm.jet(np.clip(1 - pixel_errs / max(args.thresholds), 0, 1)) \
-                    if len(pixel_errs) else np.zeros((0, 4))
-            text = [
-                f"ckpt: {ckpt_path.name}",
-                f"#Matches {len(mkpts0)}",
-                f"Mean px err: {per_pair['mean_pixel_error']:.2f}",
-                f"P@3px: {100 * per_pair.get('precision@3px', 0):.1f}%",
-                f"H aug: {'on' if args.apply_homography else 'off'}",
-                name,
-            ]
-            fig = make_matching_figure(ir, vis, mkpts0, mkpts1, color, text=text)
-            fig.savefig(str(out_dir / f"{ir_path.stem}_match.png"),
-                        dpi=150, bbox_inches="tight")
-        print(f"[{idx}/{len(names)}] {name}: matches={len(mkpts0)} "
+            fig_path = out_dir / f"{Path(pair_short).stem}_match.png"
+            _save_pair_figure(fig_path, batch, pixel_errs, args.thresholds,
+                              ckpt_path.name, pair_short, args.apply_homography)
+
+        print(f"[{idx}/{n_total}] {pair_short}: matches={per_pair['num_matches']} "
               f"mpe={per_pair['mean_pixel_error']:.2f} "
               f"p@3px={100 * per_pair.get('precision@3px', 0):.1f}%")
 
-    # write per-pair CSV
+    # ---- per-pair CSV
     csv_path = out_dir / "summary.csv"
     if rows:
         fieldnames = list(rows[0].keys())
@@ -205,20 +374,21 @@ def main() -> None:
             writer.writeheader()
             writer.writerows(rows)
 
-    # global summary
-    if all_errs:
-        flat = np.concatenate(all_errs) if all_errs else np.zeros(0)
-        summary_path = out_dir / "overall.txt"
-        with summary_path.open("w", encoding="utf-8") as f:
-            f.write(f"ckpt: {ckpt_path}\n")
-            f.write(f"pairs: {len(rows)}\n")
-            f.write(f"apply_homography: {args.apply_homography}\n")
-            f.write(f"total_matches: {len(flat)}\n")
-            f.write(f"mean_pixel_error: {float(flat.mean()) if len(flat) else 0.0:.4f}\n")
-            for t in args.thresholds:
-                v = float((flat < t).mean()) if len(flat) else 0.0
-                f.write(f"precision@{int(t)}px: {v:.4f}\n")
-        print(f"\nOverall summary written to {summary_path}")
+    # ---- per-match aggregation (matches PL_LoFTR._aggregate_roadscene_metrics)
+    flat = np.concatenate(all_errs) if all_errs else np.zeros(0)
+    summary_path = out_dir / "overall.txt"
+    with summary_path.open("w", encoding="utf-8") as f:
+        f.write(f"ckpt: {ckpt_path}\n")
+        f.write(f"main_cfg: {args.main_cfg}\n")
+        f.write(f"data_cfg: {args.data_cfg}\n")
+        f.write(f"pairs: {len(rows)}\n")
+        f.write(f"apply_homography: {args.apply_homography}\n")
+        f.write(f"total_matches: {len(flat)}\n")
+        f.write(f"mean_pixel_error: {float(flat.mean()) if len(flat) else 0.0:.4f}\n")
+        for t in args.thresholds:
+            v = float((flat < t).mean()) if len(flat) else 0.0
+            f.write(f"precision@{int(t)}px: {v:.4f}\n")
+    print(f"\nOverall summary written to {summary_path}")
     print(f"Per-pair CSV written to {csv_path}")
 
 

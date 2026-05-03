@@ -165,7 +165,7 @@ class RoadSceneDataset(utils_data.Dataset):
                  list_path: str,
                  mode: str = "train",
                  ir_subdir: str = "cropinfrared",
-                 vis_subdir: str = "crop_HR_visible",
+                 vis_subdir: str = "crop_LR_visible",
                  img_resize: Optional[int] = 480,
                  pad_size: Optional[int] = None,
                  df: int = 32,

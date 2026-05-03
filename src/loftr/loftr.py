@@ -38,6 +38,29 @@ class LoFTR(nn.Module):
         self.fine_preprocess = FinePreprocess(config)
         self.fine_matching = FineMatching(config)
 
+        # Cross-modal modality embedding (RoadScene IR-VIS).
+        # Two learnable C-dim vectors, additive at the coarse-transformer input.
+        # Residual connections then propagate the modality identity through
+        # every self/cross attention layer, so a single injection here is
+        # equivalent to "tagging" every token with its modality for the whole
+        # transformer stack. See plan step2 for the design rationale.
+        self.use_modality_emb = config.get('use_modality_emb', False)
+        if self.use_modality_emb:
+            d_model = config['coarse']['d_model']
+            init_mode = config.get('modality_emb_init', 'zeros')
+            if init_mode == 'zeros':
+                ir_init = torch.zeros(d_model)
+                vis_init = torch.zeros(d_model)
+            elif init_mode == 'normal_0.02':
+                ir_init = torch.randn(d_model) * 0.02
+                vis_init = torch.randn(d_model) * 0.02
+            else:
+                raise ValueError(
+                    f"Unknown LOFTR.MODALITY_EMB_INIT '{init_mode}'. "
+                    f"Expected one of: 'zeros', 'normal_0.02'.")
+            self.modality_emb_ir = nn.Parameter(ir_init)
+            self.modality_emb_vis = nn.Parameter(vis_init)
+
     def forward(self, data):
         """ 
         Update:
@@ -86,11 +109,27 @@ class LoFTR(nn.Module):
         if 'mask0' in data:
             mask_c0, mask_c1 = data['mask0'], data['mask1']
 
+        # Inject modality embedding before the coarse transformer. (1, C, 1, 1)
+        # broadcasts over (N, C, H, W). Doing it once at the input is enough
+        # because residuals carry the offset through every self/cross-attention
+        # layer below.
+        if self.use_modality_emb:
+            feat_c0 = feat_c0 + self.modality_emb_ir.view(1, -1, 1, 1)
+            feat_c1 = feat_c1 + self.modality_emb_vis.view(1, -1, 1, 1)
+
         feat_c0, feat_c1 = self.loftr_coarse(feat_c0, feat_c1, mask_c0, mask_c1)
 
         feat_c0 = rearrange(feat_c0, 'n c h w -> n (h w) c')
         feat_c1 = rearrange(feat_c1, 'n c h w -> n (h w) c')
-        
+
+        # Save the post-transformer coarse tokens for the cross-modal
+        # contrastive loss. Only when enabled, to avoid unnecessary memory
+        # cost in baseline training. These references keep the autograd graph
+        # alive so gradients flow back through the transformer + backbone.
+        if self.config.get('loss', {}).get('use_contrastive', False):
+            data['feat_c0_tokens'] = feat_c0   # [N, L0, C]
+            data['feat_c1_tokens'] = feat_c1   # [N, L1, C]
+
         # detect NaN during mixed precision training
         if self.config['replace_nan'] and (torch.any(torch.isnan(feat_c0)) or torch.any(torch.isnan(feat_c1))):
             detect_NaN(feat_c0, feat_c1)

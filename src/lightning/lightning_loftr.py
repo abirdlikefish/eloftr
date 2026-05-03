@@ -5,6 +5,7 @@ from loguru import logger
 from pathlib import Path
 
 import torch
+import torch.nn as nn
 import numpy as np
 import pytorch_lightning as pl
 from matplotlib import pyplot as plt
@@ -63,13 +64,59 @@ class PL_LoFTR(pl.LightningModule):
             state_dict = torch.load(pretrained_ckpt, map_location='cpu', weights_only=False)['state_dict']
             msg=self.matcher.load_state_dict(state_dict, strict=False)
             logger.info(f"Load \'{pretrained_ckpt}\' as pretrained checkpoint")
-        
+            # Explicitly surface mismatched keys so we can verify that any
+            # newly-added params (e.g. modality_emb_ir / modality_emb_vis in
+            # Step 2) really are the only "missing" keys -- if anything else
+            # shows up here it likely means the ckpt is the wrong arch.
+            if msg.missing_keys:
+                logger.info(f"  missing_keys (kept at init value): {msg.missing_keys}")
+            if msg.unexpected_keys:
+                logger.warning(f"  unexpected_keys (ignored): {msg.unexpected_keys}")
+
+        # Optional freezing for small-dataset finetune (must run AFTER the
+        # pretrained ckpt is loaded so load_state_dict still happens on the
+        # full trainable graph). Both flags default to False, so behaviour is
+        # unchanged for v0/v1/v2 runs.
+        self._freeze_bn = bool(config.LOFTR.get('FREEZE_BN', False))
+        if config.LOFTR.get('FREEZE_BACKBONE', False):
+            for p in self.matcher.backbone.parameters():
+                p.requires_grad = False
+            n_frozen = sum(p.numel() for p in self.matcher.backbone.parameters())
+            logger.info(f"Froze backbone: {n_frozen/1e6:.2f}M params")
+        if self._freeze_bn:
+            self._apply_freeze_bn()
+            logger.info("Froze all BatchNorm2d layers (eval-mode + no-grad)")
+
+        n_trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        n_total = sum(p.numel() for p in self.parameters())
+        logger.info(f"Trainable params: {n_trainable/1e6:.2f}M / Total: {n_total/1e6:.2f}M")
+
         # Testing
         self.warmup = False
         self.reparameter = False
         self.start_event = torch.cuda.Event(enable_timing=True)
         self.end_event = torch.cuda.Event(enable_timing=True)
         self.total_ms = 0
+
+    def _apply_freeze_bn(self):
+        """Set every BatchNorm2d to eval-mode and disable grads on its affine
+        params. Called once in __init__ AND from `train()` because PL's per-
+        epoch model.train() would otherwise re-enable training mode on BN.
+        """
+        for m in self.matcher.modules():
+            if isinstance(m, nn.BatchNorm2d):
+                m.eval()
+                for p in m.parameters():
+                    p.requires_grad = False
+
+    def train(self, mode=True):
+        """Override to keep frozen BN layers in eval-mode across PL's per-epoch
+        model.train() calls. Without this, freezing BN in __init__ would only
+        last until the first epoch boundary."""
+        super().train(mode)
+        if getattr(self, '_freeze_bn', False):
+            self._apply_freeze_bn()
+        return self
 
     def configure_optimizers(self):
         # FIXME: The scheduler did not work properly when `--resume_from_checkpoint`
@@ -195,6 +242,20 @@ class PL_LoFTR(pl.LightningModule):
             # scalars
             for k, v in batch['loss_scalars'].items():
                 self.logger.experiment.add_scalar(f'train/{k}', v, self.global_step)
+
+            # Log L2 norm of the modality embeddings so we can confirm they
+            # actually grow from 0 (zeros init) rather than staying dead. Stuck
+            # near 0 over multiple epochs indicates the gradient signal is
+            # too weak and we should switch MODALITY_EMB_INIT to 'normal_0.02'.
+            if getattr(self.matcher, 'use_modality_emb', False):
+                self.logger.experiment.add_scalar(
+                    'train/mod_emb_ir_norm',
+                    self.matcher.modality_emb_ir.detach().norm().item(),
+                    self.global_step)
+                self.logger.experiment.add_scalar(
+                    'train/mod_emb_vis_norm',
+                    self.matcher.modality_emb_vis.detach().norm().item(),
+                    self.global_step)
 
             # figures
             if self.config.TRAINER.ENABLE_PLOTTING:

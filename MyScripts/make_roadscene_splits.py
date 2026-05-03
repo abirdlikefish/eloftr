@@ -1,8 +1,13 @@
 """Generate fixed train/val/test split index files for RoadScene.
 
 Scans `data/RoadScene/cropinfrared/` for *.jpg files, keeps only those that
-also exist under `data/RoadScene/crop_HR_visible/`, shuffles deterministically
-and writes three plain-text index files under `data/RoadScene/index/`:
+also exist under `data/RoadScene/crop_LR_visible/`, shuffles deterministically
+and writes three plain-text index files under `data/RoadScene/index/`.
+
+Note: ``crop_LR_visible`` is the IR-aligned VIS folder (same FoV / aspect
+ratio as ``cropinfrared``). The ``crop_HR_visible`` folder contains a
+wider-FoV high-resolution VIS image and is NOT pixel-aligned with IR -- using
+it as the matching target produces meaningless ground truth.
 
   - train_pairs.txt
   - val_pairs.txt
@@ -26,8 +31,9 @@ def parse_args() -> argparse.Namespace:
                         help="RoadScene root directory.")
     parser.add_argument("--ir_subdir", type=str, default="cropinfrared",
                         help="Sub-directory containing infrared images.")
-    parser.add_argument("--vis_subdir", type=str, default="crop_HR_visible",
-                        help="Sub-directory containing visible images.")
+    parser.add_argument("--vis_subdir", type=str, default="crop_LR_visible",
+                        help="Sub-directory containing visible images "
+                             "(must be pixel-aligned with --ir_subdir).")
     parser.add_argument("--out_subdir", type=str, default="index",
                         help="Output sub-directory for index txts.")
     parser.add_argument("--ext", type=str, default=".jpg",

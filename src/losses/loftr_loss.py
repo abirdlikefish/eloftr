@@ -131,6 +131,54 @@ class LoFTRLoss(nn.Module):
             return c_pos_w * loss_pos.mean() + c_neg_w * loss_neg.mean()
 
     
+    def _compute_contrastive_loss(self, data):
+        """Symmetric (CLIP-style) InfoNCE between IR and VIS coarse tokens.
+
+        Anchors: GT-matched (b_ids, i_ids) on IR side and (b_ids, j_ids) on
+        VIS side (produced by spvs_coarse_roadscene).
+        Negatives: ALL tokens of the opposite modality across the whole batch
+        (cross-scene), so the model is forced to (a) align matched IR/VIS
+        positions and (b) push apart unrelated positions/scenes.
+
+        bs >= 2 is required to actually obtain cross-scene negatives; with
+        bs == 1 the negative pool degenerates to in-image only and InfoNCE
+        loses its main advantage over dual_softmax.
+
+        Returns:
+            loss_i2v, loss_v2i (each scalar tensor)
+        """
+        feat0 = data['feat_c0_tokens']        # [B, L0, C]
+        feat1 = data['feat_c1_tokens']        # [B, L1, C]
+        b_ids = data['spv_b_ids']             # [N_pos]
+        i_ids = data['spv_i_ids']             # [N_pos]
+        j_ids = data['spv_j_ids']             # [N_pos]
+
+        if b_ids.numel() == 0:
+            zero = torch.zeros((), device=feat0.device, dtype=feat0.dtype, requires_grad=True)
+            return zero, zero
+
+        temp = self.loss_config['contrastive_temp']
+        f0 = F.normalize(feat0.float(), dim=-1)        # cosine in [-1, 1]
+        f1 = F.normalize(feat1.float(), dim=-1)
+        B, L0, C = f0.shape
+        _, L1, _ = f1.shape
+
+        # Direction 1: IR -> VIS  (each IR anchor against all VIS tokens in batch)
+        q_ir = f0[b_ids, i_ids]                        # [N_pos, C]
+        k_vis = f1.reshape(B * L1, C)                  # [B*L1, C]
+        logits_i2v = (q_ir @ k_vis.t()) / temp         # [N_pos, B*L1]
+        target_i2v = b_ids * L1 + j_ids                # [N_pos]
+        loss_i2v = F.cross_entropy(logits_i2v, target_i2v)
+
+        # Direction 2: VIS -> IR  (each VIS anchor against all IR tokens in batch)
+        q_vis = f1[b_ids, j_ids]                       # [N_pos, C]
+        k_ir = f0.reshape(B * L0, C)                   # [B*L0, C]
+        logits_v2i = (q_vis @ k_ir.t()) / temp         # [N_pos, B*L0]
+        target_v2i = b_ids * L0 + i_ids                # [N_pos]
+        loss_v2i = F.cross_entropy(logits_v2i, target_v2i)
+
+        return loss_i2v, loss_v2i
+
     def _compute_local_loss_l2(self, expec_f, expec_f_gt):
         """
         Args:
@@ -224,6 +272,18 @@ class LoFTRLoss(nn.Module):
 
         loss += loss_l * self.loss_config['local_weight']
         loss_scalars.update({"loss_l":  loss_l.clone().detach().cpu()})
+
+        # 4. cross-modal contrastive loss (symmetric InfoNCE, optional)
+        if self.loss_config.get('use_contrastive', False) and 'feat_c0_tokens' in data:
+            loss_i2v, loss_v2i = self._compute_contrastive_loss(data)
+            loss_contrast = (loss_i2v + loss_v2i) / 2
+            loss = loss + self.loss_config['contrastive_weight'] * loss_contrast
+            loss_scalars.update({
+                'loss_contrast': loss_contrast.clone().detach().cpu(),
+                'loss_i2v':      loss_i2v.clone().detach().cpu(),
+                'loss_v2i':      loss_v2i.clone().detach().cpu(),
+                'n_pos':         torch.tensor(float(data['spv_b_ids'].numel())),
+            })
 
         loss_scalars.update({'loss': loss.clone().detach().cpu()})
         data.update({"loss": loss, "loss_scalars": loss_scalars})

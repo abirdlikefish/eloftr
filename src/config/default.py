@@ -12,6 +12,37 @@ _CN.LOFTR.REPLACE_NAN = False
 _CN.LOFTR.EVAL_TIMES = 1
 _CN.LOFTR.HALF = False
 
+# -- # cross-modal modality embedding (RoadScene IR-VIS)
+# When enabled, LoFTR adds two learnable C-dim vectors `modality_emb_ir` and
+# `modality_emb_vis` to feat_c0 / feat_c1 just before the coarse transformer
+# (broadcast over H, W). Because residual connections preserve them across all
+# subsequent self/cross-attention layers, a single injection at the input is
+# enough to make every downstream attention "modality-aware".
+#
+# Init choices:
+#   'zeros'       : safest. step 0 == baseline (adding 0 changes nothing) so
+#                   finetuning the official ckpt cannot make things worse.
+#                   The norms `mod_emb_ir_norm` / `mod_emb_vis_norm` should
+#                   grow from 0 over training.
+#   'normal_0.02' : small random init. Use only if 'zeros' fails to learn
+#                   (norms stuck near 0 after several epochs).
+_CN.LOFTR.USE_MODALITY_EMB = False
+_CN.LOFTR.MODALITY_EMB_INIT = 'zeros'
+
+# -- # parameter freezing for finetune (small-dataset overfit control)
+# When training on a small dataset (e.g. RoadScene, ~hundreds of pairs) the
+# 16M ELoFTR easily overfits within ~3 epochs. Freezing the 9.5M backbone
+# caps the effective parameter count at ~5.7M (transformer + fine + modemb)
+# so the model has less capacity to memorise the training set.
+#
+# FREEZE_BACKBONE: hard-disable gradients on `matcher.backbone.*`.
+# FREEZE_BN:       additionally lock `BatchNorm2d.eval()` (running_mean /
+#                  running_var stop updating) AND freeze BN affine params.
+#                  Implemented in PL_LoFTR with a `train()` override so PL's
+#                  per-epoch model.train() does not silently undo it.
+_CN.LOFTR.FREEZE_BACKBONE = False
+_CN.LOFTR.FREEZE_BN = False
+
 # 1. LoFTR-backbone (local feature CNN) config
 _CN.LOFTR.BACKBONE = CN()
 _CN.LOFTR.BACKBONE.BLOCK_DIMS = [64, 128, 256]  # s1, s2, s3
@@ -66,6 +97,17 @@ _CN.LOFTR.LOSS.FINE_TYPE = 'l2_with_std'  # ['l2_with_std', 'l2']
 _CN.LOFTR.LOSS.FINE_WEIGHT = 1.0
 _CN.LOFTR.LOSS.FINE_CORRECT_THR = 1.0  # for filtering valid fine-level gts (some gt matches might fall out of the fine-level window)
 
+# -- # cross-modal contrastive loss (RoadScene IR-VIS, symmetric InfoNCE)
+# When enabled, LoFTR.forward stores the post-transformer coarse tokens into
+# `data` and LoFTRLoss adds a CLIP-style symmetric InfoNCE term that pulls
+# IR/VIS features at GT-matched positions together while pushing all other
+# in-batch tokens apart. Negatives span the whole batch, so batch_size >= 2
+# is required to gain cross-scene negatives (bs=1 degenerates to within-image
+# competition, equivalent to dual_softmax pool).
+_CN.LOFTR.LOSS.USE_CONTRASTIVE = False
+_CN.LOFTR.LOSS.CONTRASTIVE_WEIGHT = 0.01      # weight on (loss_i2v + loss_v2i) / 2
+_CN.LOFTR.LOSS.CONTRASTIVE_TEMP = 0.1         # InfoNCE temperature, matches DSMAX_TEMPERATURE
+
 
 ##############  Dataset  ##############
 _CN.DATASET = CN()
@@ -109,7 +151,7 @@ _CN.DATASET.MGDPT_DF = 8
 
 # RoadScene options (only consulted when TRAINVAL_DATA_SOURCE == 'RoadScene')
 _CN.DATASET.ROAD_IR_SUBDIR = 'cropinfrared'
-_CN.DATASET.ROAD_VIS_SUBDIR = 'crop_HR_visible'
+_CN.DATASET.ROAD_VIS_SUBDIR = 'crop_LR_visible'  # IR-aligned. crop_HR_visible has a wider FoV and is NOT pixel-aligned with cropinfrared.
 _CN.DATASET.ROAD_IMG_RESIZE = 480     # longer-edge target before df-rounding
 _CN.DATASET.ROAD_DF = 32              # final H, W are multiples of df
 # Square canvas size after zero-padding (must be >= ROAD_IMG_RESIZE and divisible
@@ -174,6 +216,14 @@ _CN.TRAINER.SB_REPEAT = 1  # repeat N times for training the sampled data
 # 'random' config
 _CN.TRAINER.RDM_REPLACEMENT = True
 _CN.TRAINER.RDM_NUM_SAMPLES = None
+
+# EarlyStopping callback (added by train.py when ENABLED). Reuses the same
+# monitor / mode as ModelCheckpoint, so for RoadScene it watches
+# `precision@3px` (mode=max) and for ScanNet/MegaDepth it watches `auc@10`.
+# When val metric does not improve for PATIENCE consecutive validation
+# epochs, training is stopped. Set ENABLED = False to keep legacy behaviour.
+_CN.TRAINER.EARLY_STOPPING = False
+_CN.TRAINER.EARLY_STOPPING_PATIENCE = 2
 
 # gradient clipping
 _CN.TRAINER.GRADIENT_CLIPPING = 0.5

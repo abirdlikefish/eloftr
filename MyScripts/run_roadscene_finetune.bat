@@ -15,7 +15,7 @@ python train.py ^
   --ckpt_path=weights\eloftr_outdoor.ckpt ^
   --gpus=1 ^
   --num_nodes=1 ^
-  --batch_size=2 ^
+  --batch_size=4 ^
   --num_workers=4 ^
   --pin_memory=false ^
   --check_val_every_n_epoch=1 ^

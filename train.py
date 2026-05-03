@@ -8,7 +8,7 @@ from loguru import logger as loguru_logger
 import pytorch_lightning as pl
 from pytorch_lightning.utilities import rank_zero_only
 from pytorch_lightning.loggers import TensorBoardLogger
-from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
+from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor, EarlyStopping
 from pytorch_lightning.plugins import DDPPlugin, NativeMixedPrecisionPlugin
 
 from src.config.default import get_cfg_defaults
@@ -126,23 +126,46 @@ def main():
     # TODO: update ModelCheckpoint to monitor multiple metrics
     lr_monitor = LearningRateMonitor(logging_interval='step')
     callbacks = [lr_monitor]
+
+    # Pick monitored metric + filename template based on the dataset.
+    # ScanNet/MegaDepth use the geometric AUC@10; RoadScene has no camera
+    # geometry so we monitor pixel precision@3px logged by PL_LoFTR. Computed
+    # outside the ckpt/EarlyStopping branches so both callbacks can share it
+    # (and EarlyStopping can be enabled even when --disable_ckpt is set).
+    if config.DATASET.TRAINVAL_DATA_SOURCE == 'RoadScene':
+        monitor_metric = 'precision@3px'
+        monitor_mode = 'max'
+        filename_tpl = '{epoch}-{precision@1px:.3f}-{precision@3px:.3f}-{precision@5px:.3f}'
+    else:
+        monitor_metric = 'auc@10'
+        monitor_mode = 'max'
+        filename_tpl = '{epoch}-{auc@5:.3f}-{auc@10:.3f}-{auc@20:.3f}'
+
     if not args.disable_ckpt:
-        # Pick monitored metric + filename template based on the dataset.
-        # ScanNet/MegaDepth use the geometric AUC@10; RoadScene has no camera
-        # geometry so we monitor pixel precision@3px logged by PL_LoFTR.
-        if config.DATASET.TRAINVAL_DATA_SOURCE == 'RoadScene':
-            monitor_metric = 'precision@3px'
-            monitor_mode = 'max'
-            filename_tpl = '{epoch}-{precision@1px:.3f}-{precision@3px:.3f}-{precision@5px:.3f}'
-        else:
-            monitor_metric = 'auc@10'
-            monitor_mode = 'max'
-            filename_tpl = '{epoch}-{auc@5:.3f}-{auc@10:.3f}-{auc@20:.3f}'
         ckpt_callback = ModelCheckpoint(monitor=monitor_metric, verbose=True, save_top_k=5, mode=monitor_mode,
                                         save_last=True,
                                         dirpath=str(ckpt_dir),
                                         filename=filename_tpl)
         callbacks.append(ckpt_callback)
+
+    # Optional EarlyStopping (independent of --disable_ckpt). Reuses the same
+    # monitor metric/mode as ModelCheckpoint so the same target drives both
+    # "save best" and "stop when stops improving". Useful for small datasets
+    # where the val curve peaks early and then degrades (RoadScene baseline
+    # runs peaked at epoch <4 and dropped through epoch 20).
+    if config.TRAINER.EARLY_STOPPING:
+        callbacks.append(EarlyStopping(
+            monitor=monitor_metric,
+            mode=monitor_mode,
+            patience=config.TRAINER.EARLY_STOPPING_PATIENCE,
+            verbose=True,
+            strict=True,
+        ))
+        loguru_logger.info(
+            f"EarlyStopping enabled "
+            f"(monitor={monitor_metric}, mode={monitor_mode}, "
+            f"patience={config.TRAINER.EARLY_STOPPING_PATIENCE})"
+        )
 
     plugins = [NativeMixedPrecisionPlugin()]
     if config.TRAINER.WORLD_SIZE > 1:

@@ -79,7 +79,7 @@ class MultiSceneDataModule(pl.LightningDataModule):
 
         # RoadScene options (only consulted when DATA_SOURCE == 'RoadScene')
         self.road_ir_subdir = getattr(config.DATASET, 'ROAD_IR_SUBDIR', 'cropinfrared')
-        self.road_vis_subdir = getattr(config.DATASET, 'ROAD_VIS_SUBDIR', 'crop_HR_visible')
+        self.road_vis_subdir = getattr(config.DATASET, 'ROAD_VIS_SUBDIR', 'crop_LR_visible')
         self.road_img_resize = getattr(config.DATASET, 'ROAD_IMG_RESIZE', 480)
         self.road_df = getattr(config.DATASET, 'ROAD_DF', 32)
         # ROAD_PAD_SIZE may be None (resolved to img_resize-rounded-to-df inside the dataset)
