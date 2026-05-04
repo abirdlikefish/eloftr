@@ -35,13 +35,23 @@ _CN.LOFTR.MODALITY_EMB_INIT = 'zeros'
 # caps the effective parameter count at ~5.7M (transformer + fine + modemb)
 # so the model has less capacity to memorise the training set.
 #
-# FREEZE_BACKBONE: hard-disable gradients on `matcher.backbone.*`.
-# FREEZE_BN:       additionally lock `BatchNorm2d.eval()` (running_mean /
-#                  running_var stop updating) AND freeze BN affine params.
-#                  Implemented in PL_LoFTR with a `train()` override so PL's
-#                  per-epoch model.train() does not silently undo it.
+# FREEZE_BACKBONE:    hard-disable gradients on `matcher.backbone.*`.
+# FREEZE_BN:          additionally lock `BatchNorm2d.eval()` (running_mean /
+#                     running_var stop updating) AND freeze BN affine params,
+#                     across ALL BN in the model (backbone + fine_preprocess).
+#                     Implemented in PL_LoFTR with a `train()` override so PL's
+#                     per-epoch model.train() does not silently undo it.
+# FREEZE_BACKBONE_BN: only freeze BN layers inside `matcher.backbone.*`
+#                     (running stats stay pinned to MegaDepth pretrained
+#                     values), while `matcher.fine_preprocess.*` BN remains
+#                     trainable + train-mode. Use this when the dataset is
+#                     small but you still want fine-level BN to adapt to the
+#                     new task distribution.
+#                     NOTE: FREEZE_BN=True takes precedence over this flag and
+#                     freezes ALL BN; FREEZE_BACKBONE_BN is then a no-op.
 _CN.LOFTR.FREEZE_BACKBONE = False
 _CN.LOFTR.FREEZE_BN = False
+_CN.LOFTR.FREEZE_BACKBONE_BN = False
 
 # 1. LoFTR-backbone (local feature CNN) config
 _CN.LOFTR.BACKBONE = CN()

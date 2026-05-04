@@ -77,7 +77,8 @@ class PL_LoFTR(pl.LightningModule):
         # pretrained ckpt is loaded so load_state_dict still happens on the
         # full trainable graph). Both flags default to False, so behaviour is
         # unchanged for v0/v1/v2 runs.
-        self._freeze_bn = bool(config.LOFTR.get('FREEZE_BN', False))
+        self._freeze_bn          = bool(config.LOFTR.get('FREEZE_BN', False))
+        self._freeze_backbone_bn = bool(config.LOFTR.get('FREEZE_BACKBONE_BN', False))
         if config.LOFTR.get('FREEZE_BACKBONE', False):
             for p in self.matcher.backbone.parameters():
                 p.requires_grad = False
@@ -86,6 +87,11 @@ class PL_LoFTR(pl.LightningModule):
         if self._freeze_bn:
             self._apply_freeze_bn()
             logger.info("Froze all BatchNorm2d layers (eval-mode + no-grad)")
+        # FREEZE_BN takes precedence: when all BN already frozen above, skip the
+        # backbone-only branch to avoid redundant work and a misleading log line.
+        if self._freeze_backbone_bn and not self._freeze_bn:
+            self._apply_freeze_backbone_bn()
+            logger.info("Froze backbone BatchNorm2d layers (eval-mode + no-grad); fine_preprocess BN remains trainable")
 
         n_trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
         n_total = sum(p.numel() for p in self.parameters())
@@ -109,13 +115,30 @@ class PL_LoFTR(pl.LightningModule):
                 for p in m.parameters():
                     p.requires_grad = False
 
+    def _apply_freeze_backbone_bn(self):
+        """Freeze BN only inside `matcher.backbone.*`. Does NOT touch BN inside
+        fine_preprocess (those 2 layers stay trainable + train-mode). Called
+        once in __init__ AND from `train()` to survive PL's per-epoch
+        model.train() that would otherwise re-enable BN train-mode.
+        """
+        for m in self.matcher.backbone.modules():
+            if isinstance(m, nn.BatchNorm2d):
+                m.eval()
+                for p in m.parameters():
+                    p.requires_grad = False
+
     def train(self, mode=True):
         """Override to keep frozen BN layers in eval-mode across PL's per-epoch
         model.train() calls. Without this, freezing BN in __init__ would only
-        last until the first epoch boundary."""
+        last until the first epoch boundary. The if/elif ensures FREEZE_BN
+        (all BN) takes precedence over FREEZE_BACKBONE_BN (backbone BN only)
+        so v3 (FREEZE_BN=True) is never double-frozen even if both flags are
+        set."""
         super().train(mode)
         if getattr(self, '_freeze_bn', False):
             self._apply_freeze_bn()
+        elif getattr(self, '_freeze_backbone_bn', False):
+            self._apply_freeze_backbone_bn()
         return self
 
     def configure_optimizers(self):

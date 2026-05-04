@@ -18,6 +18,30 @@ from src.lightning.data import MultiSceneDataModule
 from src.lightning.lightning_loftr import PL_LoFTR
 import torch
 
+# PyTorch 2.6 changed torch.load's default weights_only from False to True.
+# Our own torch.load call in src/lightning/lightning_loftr.py already passes
+# weights_only=False, but PyTorch Lightning 1.3.5's internal pl_load
+# (pytorch_lightning/utilities/cloud_io.py) does not -- so any code path that
+# goes through PL's checkpoint connector (e.g. --resume_from_checkpoint, PL
+# auto-resume, ModelCheckpoint internal verification) crashes with
+#   _pickle.UnpicklingError: Weights only load failed ...
+#   Unsupported global: pytorch_lightning.callbacks.model_checkpoint.ModelCheckpoint
+# because PL 1.x pickles its own callback / scheduler instances into the ckpt.
+# Monkey-patching torch.load here makes every torch.load call (including PL's
+# internal pl_load) default to weights_only=False, while still respecting any
+# explicit weights_only=True passed by the caller. Only safe because every ckpt
+# we load in this project comes from a trusted source (official ELoFTR weights
+# or our own training runs).
+_orig_torch_load = torch.load
+
+
+def _torch_load_compat(*args, **kwargs):
+    kwargs.setdefault("weights_only", False)
+    return _orig_torch_load(*args, **kwargs)
+
+
+torch.load = _torch_load_compat
+
 import numpy as np
 np.Inf = np.inf
 

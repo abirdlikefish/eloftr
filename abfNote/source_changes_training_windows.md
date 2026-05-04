@@ -11,6 +11,7 @@
 - 单卡非分布式模式下，直接调用 `torch.distributed` 或 `DistributedSampler` 会报 `Default process group has not been initialized`。
 - 训练阶段 TensorBoard 绘图时，带梯度的 tensor 直接 `.numpy()` 会报 `Can't call numpy() on Tensor that requires grad`。
 - PyTorch 2.6+ 将 `torch.load()` 的 `weights_only` 默认值改为 `True`，加载官方 Lightning checkpoint 时可能报 `Weights only load failed`。
+- 当使用 `--resume_from_checkpoint` 续训时，PyTorch Lightning 1.3.5 内部的 `pl_load`（`pytorch_lightning/utilities/cloud_io.py`）也会调用 `torch.load`，且没有传 `weights_only=False`，会触发同样的报错；此时只补 `src/lightning/lightning_loftr.py` 那一处不够，需要在 `train.py` 入口处对 `torch.load` 做全局兼容性 monkey-patch。
 
 ## `train.py`
 
@@ -66,6 +67,37 @@ sync_batchnorm=config.TRAINER.WORLD_SIZE > 1
 ```
 
 原因：Windows 单 GPU 不需要 DDP，也没有 NCCL；只有真正多卡时才启用分布式插件和同步 BN。
+
+### 4. 全局兼容 PyTorch 2.6 的 `weights_only=True` 默认行为
+
+新增（紧跟 `import torch`、在 `pl.Trainer.from_argparse_args` 调用之前）：
+
+```python
+import torch
+_orig_torch_load = torch.load
+
+
+def _torch_load_compat(*args, **kwargs):
+    kwargs.setdefault("weights_only", False)
+    return _orig_torch_load(*args, **kwargs)
+
+
+torch.load = _torch_load_compat
+```
+
+原因：
+
+- `src/lightning/lightning_loftr.py` 里那条手写 `torch.load(..., weights_only=False)` 只覆盖了 `--ckpt_path` 旁路。
+- 一旦走 `--resume_from_checkpoint`、`Trainer` 自带的恢复逻辑或 `ModelCheckpoint` 内部校验，就会落到 `pytorch_lightning/utilities/cloud_io.py:33` 的 `torch.load(f, map_location=...)`，那里没传 `weights_only`，PyTorch 2.6+ 默认 `True` 时会报：
+
+  ```text
+  _pickle.UnpicklingError: Weights only load failed ...
+  Unsupported global: pytorch_lightning.callbacks.model_checkpoint.ModelCheckpoint
+  ```
+
+- 因为 PL 1.x 把 `ModelCheckpoint / EarlyStopping / LRScheduler` 等多个类的实例也 pickle 进了 ckpt，逐个 `add_safe_globals` 不现实，最干净的做法就是在入口处把 `torch.load` 的默认值改回 `False`。
+- 用 `kwargs.setdefault("weights_only", False)` 而不是直接覆盖，保留 “调用方显式传 `weights_only=True` 时仍尊重” 的语义。
+- 仅安全地用于本项目自训 + 官方发布的 ckpt；不要拿来加载未知来源的 `.ckpt / .pt`。
 
 ## `src/lightning/data.py`
 

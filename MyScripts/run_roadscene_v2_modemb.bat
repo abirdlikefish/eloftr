@@ -15,11 +15,13 @@ REM
 REM batch_size=4 to match run_roadscene_v1_contrast.bat. With batch_size>=2
 REM the InfoNCE negative pool spans cross-scene tokens; modality emb works
 REM with any batch_size but is logged regardless.
+
+@REM --ckpt_path=weights\eloftr_outdoor.ckpt ^
 python train.py ^
   configs\data\roadscene_trainval.py ^
   configs\loftr\eloftr_full_v2_modemb.py ^
   --exp_name=roadscene_v2_modemb ^
-  --ckpt_path=weights\eloftr_outdoor.ckpt ^
+  --resume_from_checkpoint=logs\tb_logs\roadscene_v2_modemb\version_0\checkpoints\last.ckpt ^
   --gpus=1 ^
   --num_nodes=1 ^
   --batch_size=2 ^
@@ -30,7 +32,7 @@ python train.py ^
   --limit_train_batches=1.0 ^
   --limit_val_batches=1.0 ^
   --num_sanity_val_steps=0 ^
-  --max_epochs=20 ^
+  --max_epochs=80 ^
   --disable_mp ^
   --thr 0.1
 
