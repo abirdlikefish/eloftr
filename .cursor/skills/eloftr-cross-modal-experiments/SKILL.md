@@ -1,6 +1,6 @@
 ---
 name: eloftr-cross-modal-experiments
-description: Train and ablate cross-modal EfficientLoFTR variants (v1 contrastive loss, v2 modality embedding, v3 freeze + EarlyStopping, v4 unfreeze backbone with softer LR) on RoadScene IR-VIS. Use when the user mentions v1 / v2 / v3 / v4, cross-modal, contrastive loss, InfoNCE, modality embedding, modemb, freeze backbone, EarlyStopping, ablation, USE_CONTRASTIVE, USE_MODALITY_EMB, FREEZE_BACKBONE, WARMUP_STEP, MSLR_MILESTONES, or wants to add a new v5 experiment that reuses the official pretrained weights.
+description: Train and ablate cross-modal EfficientLoFTR variants (v1 contrastive loss, v2 modality embedding, v3 freeze + EarlyStopping, v4 selective BN freeze with REVISION 2 = FREEZE_BACKBONE_BN) on RoadScene IR-VIS. Use when the user mentions v1 / v2 / v3 / v4 / v5, cross-modal, contrastive loss, InfoNCE, modality embedding, modemb, freeze backbone, FREEZE_BN, FREEZE_BACKBONE_BN, fine_preprocess BN, REVISION 2, BN running stats convergence, EarlyStopping, ablation, USE_CONTRASTIVE, USE_MODALITY_EMB, FREEZE_BACKBONE, WARMUP_STEP, MSLR_MILESTONES, scaling RoadScene with LLVIP / M3FD / KAIST, or wants to add a new v5 experiment that reuses the official pretrained weights.
 ---
 
 # RoadScene 跨模态实验：v1 / v2 / v3 / v4 与如何加 v5
@@ -14,9 +14,11 @@ description: Train and ablate cross-modal EfficientLoFTR variants (v1 contrastiv
 flowchart LR
     base["configs/loftr/eloftr_full.py<br/>(MegaDepth baseline)"] --> v1["v1_contrast.py<br/>+ symmetric InfoNCE"]
     v1 --> v2["v2_modemb.py<br/>+ learnable modality emb"]
-    v2 --> v3["v3_combined.py<br/>+ freeze backbone/BN<br/>+ EarlyStopping<br/>+ aggressive LR schedule"]
-    v3 --> v4["v4_combined.py<br/>- unfreeze backbone (keep BN frozen)<br/>- softer LR / longer warmup<br/>- looser ES patience"]
+    v2 --> v3["v3_combined.py<br/>+ FREEZE_BACKBONE=True<br/>+ FREEZE_BN=True (all BN frozen)<br/>+ EarlyStopping<br/>+ aggressive LR schedule"]
+    v3 --> v4["v4_combined.py (REVISION 2)<br/>- FREEZE_BACKBONE=False (restore 9.5M backbone)<br/>- FREEZE_BN=False (release fine BN)<br/>+ FREEZE_BACKBONE_BN=True (pin backbone BN only)<br/>- softer LR (TRUE_LR=1.25e-4) + WARMUP_STEP=2<br/>- MSLR=[10,15,20] + ES patience=8"]
 ```
+
+> v4 经过两轮修订：REVISION 1（仅降 LR + 加长 epoch）被实测证伪，当前 v4 处于 REVISION 2 状态。详见 §5。
 
 每个 v_x 配置只 `from <previous> import cfg` 然后修改若干字段，**强制累计**：v4 一定包含 v1+v2 的全部能力（loss_contrast / modemb），所以 ablation 时只需要改 main_cfg_path，不需要再编辑代码。
 
@@ -95,13 +97,50 @@ cfg.TRAINER.WARMUP_STEP        = 1         # 实际等于关掉 warmup
 cfg.TRAINER.MSLR_MILESTONES    = [5, 7]    # 默认 [8,12,16,20,24] 太晚
 ```
 
-### 3.1 Freeze backbone + BN
+### 3.1 三个 freeze flag 的优先级与实现
 
-[src/lightning/lightning_loftr.py:80-119](../../../src/lightning/lightning_loftr.py)：
-- `__init__` 末尾按 `LOFTR.FREEZE_BACKBONE / FREEZE_BN` flag：
-  - 把 `self.matcher.backbone.parameters()` 全部 `requires_grad=False`，并 log 冻结参数量（应该 ~9.5M）。
-  - 调用 `_apply_freeze_bn()` 把所有 `BatchNorm2d` 设为 `.eval()` 并冻结 affine 参数。
-- 重写 `train(mode)` 方法：因为 PL 每个 epoch 都会 `self.train(True)` 把所有子模块放回 train 模式，会顺带把 BN 改回去。`train()` override 里在 `super().train(mode)` 之后再调一次 `_apply_freeze_bn()`，永久维持 BN.eval。
+[src/config/default.py:38-54](../../../src/config/default.py) 提供三个独立 flag，全部默认 `False`（保持 v0/v1/v2 行为字节级一致）：
+
+| Flag | 作用范围 | 同时影响 |
+|------|---------|----------|
+| `FREEZE_BACKBONE` | `matcher.backbone.*` 所有 conv 权重 `requires_grad=False` | 不动 BN 模式（BN 仍 train-mode + running stats 仍更新） |
+| `FREEZE_BN` | **所有** `BatchNorm2d` (backbone **+** fine_preprocess) eval-mode + affine 冻结 | 包含 fine BN |
+| `FREEZE_BACKBONE_BN` | **仅** `matcher.backbone.*` 内的 BN eval-mode + affine 冻结；fine_preprocess BN 保持 trainable | 不影响 backbone conv 权重 |
+
+**优先级**：`FREEZE_BN=True` 覆盖 `FREEZE_BACKBONE_BN`（前者已冻全部 BN，后者再做就重复 + 污染日志）。优先级靠两处守卫保证：
+
+[src/lightning/lightning_loftr.py:80-94](../../../src/lightning/lightning_loftr.py) 的 `__init__`：
+```python
+self._freeze_bn          = bool(config.LOFTR.get('FREEZE_BN', False))
+self._freeze_backbone_bn = bool(config.LOFTR.get('FREEZE_BACKBONE_BN', False))
+if config.LOFTR.get('FREEZE_BACKBONE', False):
+    for p in self.matcher.backbone.parameters(): p.requires_grad = False
+if self._freeze_bn:
+    self._apply_freeze_bn()
+if self._freeze_backbone_bn and not self._freeze_bn:   # ← and-not 守卫
+    self._apply_freeze_backbone_bn()
+```
+
+[src/lightning/lightning_loftr.py:130-142](../../../src/lightning/lightning_loftr.py) 的 `train()` override（PL 每 epoch 都会 `self.train(True)` 把 BN 拉回 train-mode，必须重新冻一遍）：
+```python
+def train(self, mode=True):
+    super().train(mode)
+    if getattr(self, '_freeze_bn', False):
+        self._apply_freeze_bn()
+    elif getattr(self, '_freeze_backbone_bn', False):   # ← elif 而非 if
+        self._apply_freeze_backbone_bn()
+    return self
+```
+
+**反向兼容验证**（v0/v1/v2/v3 字节级不变）：
+
+| 版本 | FREEZE_BN | FREEZE_BACKBONE_BN | __init__ 走哪 | train() 走哪 |
+|------|-----------|--------------------|--------------|-------------|
+| v0/v1/v2 | False (default) | False (default) | 都跳过 | 都跳过 |
+| v3 | True | False (default) | 走 `_apply_freeze_bn`；backbone-only 被 `not _freeze_bn` 拦下 | 走 `if` 分支，`elif` 不进入 |
+| v4 (REVISION 2) | False | True | 走 `_apply_freeze_backbone_bn` | 走 `elif` 分支 |
+
+`_apply_freeze_backbone_bn` 用 `self.matcher.backbone.modules()` 严格限定遍历范围，**不会跨到 fine_preprocess / loftr_coarse / fine_matching**——这是 REVISION 2 能"只冻 backbone BN 而保留 fine BN 可训"的关键。
 
 ### 3.2 Optimizer 只看可训练参数
 
@@ -117,20 +156,26 @@ cfg.TRAINER.MSLR_MILESTONES    = [5, 7]    # 默认 [8,12,16,20,24] 太晚
 
 ### 3.4 启动日志验收清单
 
-跑 `MyScripts/run_roadscene_v3_debug.bat`，前 30 行应该能看到：
+不同 freeze 配置启动后期望看到的日志（前 30 行内）：
 
+| 跑哪个 | 关键日志 | Trainable params |
+|--------|----------|----------------|
+| v3 (`FREEZE_BACKBONE=True, FREEZE_BN=True`) | `Froze backbone: 9.50M params` + `Froze all BatchNorm2d layers (eval-mode + no-grad)` | `~5.7M / Total: ~16.0M` |
+| v4 REVISION 2 (`FREEZE_BACKBONE=False, FREEZE_BN=False, FREEZE_BACKBONE_BN=True`) | `Froze backbone BatchNorm2d layers (eval-mode + no-grad); fine_preprocess BN remains trainable` | `~15.99M / Total: ~16.0M`（仅 backbone BN ~10K affine 被冻） |
+| v0/v1/v2 (`默认全 False`) | 上述 freeze 日志**全部缺席** | `~16.0M / Total: ~16.0M`（全开） |
+
+通用：
 ```
-Froze backbone: 9.50M params
-Froze all BatchNorm2d layers (eval-mode + no-grad)
-Trainable params: ~5.7M / Total: ~16.0M       ← key signal
 missing_keys (kept at init value): ['modality_emb_ir', 'modality_emb_vis']
-EarlyStopping enabled (monitor=precision@3px, mode=max, patience=4)
+EarlyStopping enabled (monitor=precision@3px, mode=max, patience=...)
 ```
 
 TensorBoard 应同时出现 baseline / v1 / v2 三套 loss：
 - `train/loss_c, loss_f, loss_l`（baseline）
 - `train/loss_contrast, loss_i2v, loss_v2i, n_pos`（v1）
 - `train/mod_emb_ir_norm, mod_emb_vis_norm`（v2）
+
+**Sanity 检查**：v4 REVISION 2 启动后如果 trainable params 显示 ~5.7M（接近 v3），说明 `not self._freeze_bn` 守卫失效或 v4 配置被覆盖到 `FREEZE_BN=True`，必须排查 yacs 合并顺序。
 
 ## 4. 必看坑：LR / WARMUP_STEP / MSLR_MILESTONES
 
@@ -151,9 +196,110 @@ WARMUP_STEP = math.floor(WARMUP_STEP / _scaling)       # WARMUP 反向放大！
 - **`MSLR_MILESTONES` 必须 < `EARLY_STOPPING_PATIENCE` + 典型见顶 epoch**，否则 ES 在第一次 LR decay 之前就触发，整套 schedule 等于没用。
 - **train_loss 一直降但 val 在 epoch 3-6 见顶后回落** = 过拟合，不是 “还没收敛”。再加 epoch 没用，要么冻结、要么早停、要么换更强正则。
 
-## 5. 怎么加新 v5
+## 5. v3/v4 实测结果与 REVISION 2 诊断
 
-例子：v5 给 modality embedding 加 L2 正则，控制 norm 增长（v4 验证后如果 modemb 仍然跑飞 + val 重蹈下降，就走这条路）。最小流程：
+### 5.1 实测分数（precision@Npx，最佳 epoch）
+
+| run | 最佳 ep | p@1px | p@3px | p@5px | 备注 |
+|-----|---------|-------|-------|-------|------|
+| **v2 v0**（baseline 最佳） | 49 | **0.741** | **0.800** | 0.806 | bs=2，effective TRUE_LR ~2.67e-5，~6400 step |
+| 原 v4 v0（FREEZE_BN=True） | 14 | — | 0.711 | — | bs=4，TRUE_LR=1.25e-4，~880 step |
+| v4 REVISION 1（仅降 LR + 80 epoch）| — | — | ~0.684 | — | **被实测证伪**（更差） |
+| v4 REVISION 2（FREEZE_BACKBONE_BN=True） | 9 | 0.329 | 0.716 | **0.814** | bs=4，~640 step（ES 在 ep 16 触发） |
+
+### 5.2 假设演化
+
+```mermaid
+flowchart TD
+    obs0["v4 (0.711) < v2 (0.800)"] --> h1["假设 A：LR 太高 / 步数太少<br/>v2 effective LR ~2.67e-5 vs v4 1.25e-4"]
+    h1 --> r1["REVISION 1：CANONICAL_LR 2e-3→4e-4, max_epochs 30→80"]
+    r1 --> obs1["实测 ~0.684，反而更差"]
+    obs1 --> h2["假设 B：FREEZE_BN=True 把 fine_preprocess BN 也冻了<br/>fine 级 IR-VIS 适应被切断"]
+    h2 --> r2["REVISION 2：FREEZE_BN=False + FREEZE_BACKBONE_BN=True<br/>（回滚 LR/epoch 到原 v4）"]
+    r2 --> obs2["p@3=0.716 (≈原 v4)<br/>p@5=0.814 (反超 v2)<br/>p@1=0.329 (暴跌)"]
+    obs2 --> h3["新假设：fine BN 解冻方向对，但 ~640 step 内 BN running stats 没收敛<br/>验证时用未收敛的 stats normalize → fine refinement 乱推"]
+```
+
+### 5.3 关键诊断信号：p@5 反超 v2，但 p@1 暴跌
+
+REVISION 2 出现了之前所有版本都没见过的指标分布：
+
+| 阈值 | v2 v0 | v4 REVISION 2 | Δ |
+|------|-------|---------------|---|
+| p@5px | 0.806 | **0.814 (+0.008)** | 粗匹配（coarse）质量持平甚至更好 |
+| p@3px | 0.800 | 0.716 (-0.084) | 中等精度位置稍差 |
+| p@1px | 0.741 | **0.329 (-0.412)** | 亚像素精度 **塌了一半** |
+
+**亚像素塌而粗匹配反而稍好**是非常诊断性的指纹：
+- coarse transformer + dual-softmax 在 1/8 分辨率上仍然能找到对的 patch（→ p@5 OK）
+- 但 fine 级 refinement 把已经对上的点 "推偏了"（→ p@1 崩坏）
+- `fine_preprocess` 的 2 个 BN（[src/loftr/loftr_module/fine_preprocess.py](../../../src/loftr/loftr_module/fine_preprocess.py) 的 `layer{1,2}_outconv2[1]`，共 ~768 affine 参数）正好夹在 coarse-to-fine 上采样之后、`fine_matching` 之前——它们出问题就是 sub-pixel refine 出问题
+
+### 5.4 根本机制：BN running-stats 收敛需要 ≥3000 step
+
+BN 用 momentum=0.1 的 EMA 更新 running stats：
+```
+running_stat ← 0.9 * running_stat + 0.1 * batch_stat
+```
+
+- v2 v0：bs=2 + ~80 step/epoch × 80 epoch = **~6400 步 BN 更新**，加上 v2 effective LR 极小（~2.67e-5），特征分布漂移得也慢，**BN running stats 有时间追上**
+- v4 REVISION 2：bs=4 + ~40 step/epoch × ~16 epoch = **~640 步 BN 更新**，BN 还停留在 "从 MegaDepth pretrained stats 漂移到 IR-VIS 域的中途"——**未收敛**
+- 验证时用 `running_stat`（不用 batch_stat），未收敛的 stats 直接喂给 fine refinement → 亚像素回归乱推
+
+### 5.5 REVISION 2 假设的最终判定
+
+按 [configs/loftr/eloftr_full_v4_combined.py](../../../configs/loftr/eloftr_full_v4_combined.py) docstring 写的判定标准（"p@3px 接近 v2 ~0.80 = 假设确认；停留在 ~0.71 = 假设证伪"）：
+
+- p@3px 0.716 ≈ 原 v4 0.711 → **"fine BN 全冻是 v4 < v2 的主要瓶颈" 假设被证伪**
+- 但 p@5px 反超 + p@1px 暴跌的指纹 → **方向对，被另一个因素压制（BN 收敛步数不足）**
+
+修正后的真正归因：**v2 的胜利不是任何单一架构选择，而是 "fine BN 解冻 + 极慢 LR + 极长训练" 三者的组合**。换掉任意一项（v3/v4 冻 fine BN，或 v4 REVISION 2 解冻 fine BN 但短训练）都会塌掉。
+
+> 实现层面 `FREEZE_BACKBONE_BN` 这个 flag **本身是正确的**——p@5 反超就是 backbone BN 被正确冻住的证据，p@1 暴跌就是 fine BN 被精确解冻的证据。后续 v5 可直接复用此 flag。
+
+## 6. 怎么加新 v5：三条候选路径与选型
+
+§5 的诊断结论 ("v2 赢在 fine BN 解冻 + 极慢 LR + 极长训练 三件套，缺一不可") 直接决定 v5 的方向。按性价比 + 工程量排序：
+
+### 路径 A：复刻 v2 的"慢 LR + 长 epoch"（code-only，0 数据改动）
+
+最低成本，直接验证 §5 的归因是否正确。在 v4 REVISION 2 基础上：
+
+```python
+# configs/loftr/eloftr_full_v5_slowlong.py
+from configs.loftr.eloftr_full_v4_combined import cfg
+
+cfg.TRAINER.CANONICAL_LR            = 4e-4   # TRUE_LR 2.5e-5 ≈ v2 effective peak
+cfg.TRAINER.MSLR_MILESTONES         = [40, 60]   # 让大部分时间在 full LR
+cfg.TRAINER.EARLY_STOPPING_PATIENCE = 16    # v2 的最佳 ep 是 49，patience 必须够大
+# bat: --max_epochs=80
+```
+
+预期：fine BN 有 80 epoch × 40 step ≈ 3200 次更新（vs REVISION 2 的 640），running stats 应该能收敛。如果 p@1px 在 ep 30-50 之间从 ~0.3 缓慢爬到 ~0.7，就实锤了 §5.4 的 BN 收敛假设。
+
+### 路径 B：扩数据（LLVIP / M3FD）+ bs↑ + epoch↓（推荐，能根治多个瓶颈）
+
+RoadScene 已经全量用完（221 对，177/22/22 split，见 [eloftr-roadscene-data](../eloftr-roadscene-data/SKILL.md) §6）。要根治 BN 收敛 + 过拟合 + val 噪声，需要**真正多数据**：
+
+| 候选数据集 | 规模 | 像素对齐 | 域偏移 vs RoadScene |
+|-----------|------|----------|--------------------|
+| **LLVIP** | ~30k 对 | ✓ 已对齐 | 中（夜景城市监控 vs 行车 FLIR） |
+| M3FD | ~4.2k 对 | ✓ | 低（多场景） |
+| KAIST Multispectral | ~95k 对 | ✗ 需校准 | 低（同样行车） |
+
+工程改动：
+1. 写 `LLVIPDataset` 类（参考 [src/datasets/roadscene.py](../../../src/datasets/roadscene.py) 模板，复用 A3 padding + Homography aug）
+2. [src/lightning/data.py](../../../src/lightning/data.py) `_setup_dataset` 加 `data_source == 'llvip'` short-circuit 分支
+3. 用 `ConcatDataset(roadscene_train, llvip_train)` + 域均衡 sampler（避免 LLVIP 把 RoadScene 淹没）
+4. **val/test 仍只用 RoadScene 22 + 22 对**，保证跟 v0-v4 的指标公平可比
+5. 配套 v4 的 freeze 设置 (`FREEZE_BACKBONE_BN=True`) 不变；bs 放大到 8 或 16（数据多了过拟合风险下降）
+6. `max_epochs` 反而可以**减小**到 5-10（每 epoch 步数多了 ~170 倍，wall-clock 时间不会爆炸）
+
+预期：解决 §5.4 BN 收敛 + 过拟合 + InfoNCE 负样本池 + modemb 步数四个瓶颈，代价是 1-2 天工程。
+
+### 路径 C：modemb L2 正则（fallback，不推荐先做）
+
+只有当路径 A 跑出来后发现 modemb norm 仍持续涨 + val 见顶后回落，才需要走这条。最小流程：
 
 1. 在 [src/config/default.py](../../../src/config/default.py) 加默认开关（默认 False，保持向后兼容）：
    ```python
@@ -176,16 +322,38 @@ WARMUP_STEP = math.floor(WARMUP_STEP / _scaling)       # WARMUP 反向放大！
 5. 复制 v4 的三个 `.bat` 改 `--exp_name=roadscene_v5_modreg` 和 `main_cfg_path`。
 6. 不需要动 `train.py / lightning_loftr.py / optimizer`（除非引入了新的 `nn.Parameter` 模块）。
 
-按这条路径加新实验有两个隐性好处：
-- 任何对 baseline 的改动会自动 cascade 到 v1→v2→v3→v4→v5，不需要在每个 config 重复。
-- ablation 只需要 swap main_cfg_path，结果可比性强。
+> §5 的指纹（p@1 暴跌 + p@5 反超）已说明 modemb 不是当前主因，所以 modreg 优先级低于路径 A、B。
 
-## 6. 实验对应表
+### 选型决策树
 
-| 实验 | main_cfg_path | 主要 bat | 启用的能力 |
-|------|---------------|---------|-----------|
-| baseline (v0) | `configs/loftr/eloftr_full.py` | `run_roadscene_finetune.bat`（legacy） | 仅 baseline focal loss |
-| v1 | `configs/loftr/eloftr_full_v1_contrast.py` | `run_roadscene_v1_contrast.bat` | + symmetric InfoNCE |
-| v2 | `configs/loftr/eloftr_full_v2_modemb.py` | `run_roadscene_v2_modemb.bat` | + modality embedding |
-| v3 | `configs/loftr/eloftr_full_v3_combined.py` | `run_roadscene_v3_combined.bat` | + freeze backbone/BN + EarlyStopping + 激进 LR schedule |
-| v4 | `configs/loftr/eloftr_full_v4_combined.py` | `run_roadscene_v4_combined.bat` | v3 但**解冻 backbone**（保留 FREEZE_BN + ES）+ 中等 LR (TRUE_LR=1.25e-4) + WARMUP_STEP=2 + MSLR=[10,15,20] + ES patience=8 |
+```mermaid
+flowchart TD
+    start["想做 v5"] --> q1{"想花多少时间？"}
+    q1 -->|"半天，先验证 §5 的归因"| pathA["路径 A：v5_slowlong<br/>仅改 LR/MSLR/patience/max_epochs"]
+    q1 -->|"1-2 天，根治多个瓶颈"| pathB["路径 B：v5_llvip<br/>加 LLVIP 数据 + bs↑ + epoch↓"]
+    pathA --> obsA{"p@1px 在 ep 30-50 爬到 0.7+？"}
+    obsA -->|"是"| done1["BN 收敛假设 ✓<br/>v5 完成，可写论文"]
+    obsA -->|"否，p@1 仍 ~0.3"| pathC["路径 C：v5_modreg<br/>给 modemb 加 L2"]
+    pathB --> obsB{"在 RoadScene val 上接近 v2 0.80？"}
+    obsB -->|"是"| done2["数据扩展有效<br/>v5 完成"]
+    obsB -->|"否"| pathA
+```
+
+### 共同的"加 v5"工程惯例
+
+无论走哪条路径，都遵守：
+1. 在 [src/config/default.py](../../../src/config/default.py) 加默认开关（默认 False，保持向后兼容）
+2. config 一定 `from configs.loftr.eloftr_full_v4_combined import cfg` 继承 v4，**不要从头建 cfg**
+3. 复制 v4 的三个 `.bat`（debug / small / 完整）改 `--exp_name=roadscene_v5_xxx` 和 `main_cfg_path`
+4. 任何对 baseline 的改动会自动 cascade 到 v1→v2→v3→v4→v5
+5. ablation 只需要 swap main_cfg_path，结果可比性强
+
+## 7. 实验对应表
+
+| 实验 | main_cfg_path | 主要 bat | 启用的能力 | 实测最佳 p@3px |
+|------|---------------|---------|-----------|---------------|
+| baseline (v0) | `configs/loftr/eloftr_full.py` | `run_roadscene_finetune.bat`（legacy） | 仅 baseline focal loss | — |
+| v1 | `configs/loftr/eloftr_full_v1_contrast.py` | `run_roadscene_v1_contrast.bat` | + symmetric InfoNCE | — |
+| v2 | `configs/loftr/eloftr_full_v2_modemb.py` | `run_roadscene_v2_modemb.bat` | + modality embedding | **0.800** (ep 49) |
+| v3 | `configs/loftr/eloftr_full_v3_combined.py` | `run_roadscene_v3_combined.bat` | + FREEZE_BACKBONE/BN + EarlyStopping + 激进 LR schedule | 0.678 |
+| v4 (REVISION 2) | `configs/loftr/eloftr_full_v4_combined.py` | `run_roadscene_v4_combined.bat` | v3 但**解冻 backbone + FREEZE_BN=False + FREEZE_BACKBONE_BN=True**（仅冻 backbone BN，fine BN 保留可训）+ TRUE_LR=1.25e-4 + WARMUP_STEP=2 + MSLR=[10,15,20] + ES patience=8 | 0.716 (ep 9)，伴随 p@1=0.329 / p@5=0.814 异常分布 |

@@ -131,7 +131,16 @@ elif mask_w0 != mask_W0:                                                    # �
 
 - `cropinfrared / crop_LR_visible / crop_HR_visible` 三个目录里的文件名集合一致（同一个 RoadScene 帧），所以从 HR 切到 LR **不需要重新生成 `train/val/test_pairs.txt`**。
 - 想换不同的 80/10/10 → 用 [MyScripts/make_roadscene_splits.py](../../../MyScripts/make_roadscene_splits.py)，默认就是 80/10/10、同种子。
-- 生成完一定要 `wc -l data\RoadScene\index\*_pairs.txt` 检查总行数 = 数据集对数（约 200）；少了说明哪个目录文件名集合对不上，必须先核对。
+- 生成完一定要 `wc -l data\RoadScene\index\*_pairs.txt` 检查总行数 = 数据集对数（**221 对**，README 上写明）；少了说明哪个目录文件名集合对不上，必须先核对。
+
+### 数据规模与 BN 收敛瓶颈（重要）
+
+当前 split 是 **177 train / 22 val / 22 test**（已用满 221 对）。这个数量级给训练带来两个隐性后果，直接影响 v3/v4 实验的指标解读：
+
+1. **BN running-stat 收敛步数不足**：bs=4 时 ~40 step/epoch，30 epoch 仅 ~1200 step。BN 用 momentum=0.1 EMA 更新 running stats，从 MegaDepth 预训练值漂移到 IR-VIS 域典型需要 ≥3000 步，所以**任何"解冻 fine_preprocess BN"的 v_x 实验都需要至少 80 epoch 或扩数据**才能让 running stats 收敛。已用 v4 REVISION 2 的实测验证（p@1px 暴跌到 0.329 而 p@5px 反超到 0.814）见 [eloftr-cross-modal-experiments §5](../eloftr-cross-modal-experiments/SKILL.md)。
+2. **过拟合 + val 噪声大**：22 对 val 的 p@3px 单点波动可达 ±0.02-0.03，EarlyStopping patience=8 在小 val 上**容易误触发**；177 train 配 16M 参数模型也很容易在几个 epoch 内 memorize → v3 必须 `FREEZE_BACKBONE=True`（冻 9.5M backbone）才能勉强稳住。
+
+如果想根治这两个问题，**调 split 比例（80→95%）几乎没用**（177→210，仅 +18%，且 val 缩到 11 对反而更不稳），需要走 [eloftr-cross-modal-experiments §6 路径 B](../eloftr-cross-modal-experiments/SKILL.md)：加 LLVIP（~30k 对，已对齐）/ M3FD（~4.2k 对）作为额外 train 数据，**val/test 仍保留 RoadScene 22+22 对**以保证跟 v0-v4 指标公平可比。
 
 ## 7. 最常见错误 → 定位指南
 
