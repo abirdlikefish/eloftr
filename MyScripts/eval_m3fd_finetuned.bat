@@ -1,12 +1,14 @@
 @echo off
 REM ============================================================
-REM  eval_roadscene_finetuned.bat
-REM  Always evaluates on RoadScene's test_pairs.txt regardless of which
-REM  dataset the model was finetuned on (so v1..v4 RoadScene-trained and
-REM  v5+ M3FD-trained models all get scored against the same test set).
+REM  eval_m3fd_finetuned.bat
+REM  Sister of MyScripts\eval_roadscene_finetuned.bat: same X / Y / Z input
+REM  semantics, but evaluates on the M3FD_Detection test split instead of
+REM  RoadScene test. Use this to score:
+REM    * v5+ M3FD-trained models in-domain (eval_m3fd matches train data)
+REM    * v1..v4 RoadScene-trained models cross-dataset (OOD on M3FD)
 REM
 REM  Usage:
-REM    eval_roadscene_finetuned.bat X [Y] [Z]
+REM    eval_m3fd_finetuned.bat X [Y] [Z]
 REM
 REM  Inputs (all support -1 as "use default"):
 REM    X : version number (1, 2, 3, 4, 5, ...)
@@ -18,24 +20,28 @@ REM          -> required (no real default; -1 is treated as missing)
 REM    Y : lightning version_Y under that experiment (optional)
 REM          -> default = highest-numbered version_N
 REM             (numbering may be non-contiguous; we pick the max)
-REM    Z : ckpt rank by precision@3px (optional)
-REM          1..5 = pick the 1st..5th best ckpt (sorted desc by p@3px)
+REM    Z : ckpt rank by precision@3px (optional, ranking is by the value
+REM          baked into the ckpt filename, which is the metric on the
+REM          training-time val split -- not necessarily the M3FD test
+REM          ranking; this is intentional, the same Z=1 picks the same
+REM          ckpt as eval_roadscene_finetuned.bat for apples-to-apples
+REM          comparison)
+REM          1..5 = pick the 1st..5th best ckpt
 REM          6    = pick last.ckpt
 REM          -> default = 1 (best p@3px)
 REM
-REM  Note: positional args naturally enforce "Z requires Y";
-REM        if you want default Y but custom Z, pass Y=-1.
+REM  Note: positional args naturally enforce "Z requires Y"; if you want
+REM        default Y but custom Z, pass Y=-1.
 REM
 REM  cfg picked: configs\loftr\eloftr_full_vX_*.py
 REM              (auto-glob; if multiple match for the same X, the first
 REM               alphabetical match is used and a warning is printed)
 REM
 REM  Examples:
-REM    eval_roadscene_finetuned.bat 3              -> v3, latest version, best p@3px
-REM    eval_roadscene_finetuned.bat 2 1            -> v2, version_1, best p@3px
-REM    eval_roadscene_finetuned.bat 4 -1 6         -> v4, latest version, last.ckpt
-REM    eval_roadscene_finetuned.bat 3 2 3          -> v3, version_2, 3rd best p@3px
-REM    eval_roadscene_finetuned.bat 5              -> v5 m3fd-trained, eval on RoadScene
+REM    eval_m3fd_finetuned.bat 5              -> v5 m3fd-trained, in-domain test
+REM    eval_m3fd_finetuned.bat 5 -1 6         -> v5 latest version, last.ckpt
+REM    eval_m3fd_finetuned.bat 4              -> v4 roadscene-trained, OOD on M3FD
+REM    eval_m3fd_finetuned.bat 3 2 3          -> v3, version_2, 3rd best p@3px
 REM ============================================================
 
 setlocal enabledelayedexpansion
@@ -57,7 +63,7 @@ REM separated by spaces or commas; missing tokens stay at their cmdline /
 REM default values.
 if "%X%"=="" (
     set "_input="
-    set /p _input="Enter X [Y] [Z] (e.g. '2 1' or '3 -1 6'; -1 = use default): "
+    set /p _input="Enter X [Y] [Z] (e.g. '5 0' or '4 -1 6'; -1 = use default): "
     if not "!_input!"=="" (
         for /f "tokens=1,2,3 delims=, " %%a in ("!_input!") do (
             set "X=%%a"
@@ -209,21 +215,39 @@ if not exist "!FT_CFG!" (
     exit /b 1
 )
 
-REM OUT_DIR tag: strip leading "roadscene_" so v1..v4 dump paths stay the
-REM same as before; for any other dataset prefix (m3fd_, ...) keep the full
-REM EXP name to distinguish cross-dataset evals.
+REM OUT_DIR tag: strip leading "m3fd_" (= same dataset as eval) so v5+
+REM in-domain dump paths stay short; for any other dataset prefix
+REM (roadscene_, ...) keep the full EXP name so cross-dataset evals are
+REM obvious from the dump dir name.
 set "EXP_TAIL=!EXP!"
-if /i "!EXP_TAIL:~0,10!"=="roadscene_" set "EXP_TAIL=!EXP_TAIL:~10!"
+if /i "!EXP_TAIL:~0,5!"=="m3fd_" set "EXP_TAIL=!EXP_TAIL:~5!"
 
-set "OUT_DIR=dump\roadscene_eval_!EXP_TAIL!_version!Y!_!Z_TAG!"
+set "OUT_DIR=dump\m3fd_eval_!EXP_TAIL!_version!Y!_!Z_TAG!"
+
+REM ---- M3FD test split ----------------------------------------------------
+set "M3FD_DATA_CFG=configs\data\m3fd_trainval.py"
+set "M3FD_TEST_LIST=data\M3FD_Detection\index\test_pairs.txt"
+if not exist "!M3FD_DATA_CFG!" (
+    echo [ERROR] cannot find M3FD data cfg: !M3FD_DATA_CFG!
+    pause
+    exit /b 1
+)
+if not exist "!M3FD_TEST_LIST!" (
+    echo [ERROR] cannot find M3FD test list: !M3FD_TEST_LIST!
+    echo         did you run MyScripts\make_m3fd_splits.py yet?
+    pause
+    exit /b 1
+)
 
 echo.
 echo ============================================================
+echo   Eval set   : M3FD test (!M3FD_TEST_LIST!)
 echo   Experiment : !EXP!
 echo   Version    : version_!Y!
 echo   Z (rank)   : !Z!  (!Z_TAG!)
 echo   Ckpt       : !FT_CKPT!
-echo   Cfg        : !FT_CFG!
+echo   Cfg (LoFTR): !FT_CFG!
+echo   Cfg (data) : !M3FD_DATA_CFG!
 echo   Out dir    : !OUT_DIR!
 echo ============================================================
 echo.
@@ -231,7 +255,8 @@ echo.
 python MyScripts\eval_roadscene.py ^
   --ckpt "!FT_CKPT!" ^
   --main_cfg "!FT_CFG!" ^
-  --list_path data\RoadScene\index\test_pairs.txt ^
+  --data_cfg "!M3FD_DATA_CFG!" ^
+  --list_path "!M3FD_TEST_LIST!" ^
   --out_dir "!OUT_DIR!" ^
   --thr 0.1
 

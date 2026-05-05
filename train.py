@@ -14,6 +14,7 @@ from pytorch_lightning.plugins import DDPPlugin, NativeMixedPrecisionPlugin
 from src.config.default import get_cfg_defaults
 from src.utils.misc import get_rank_zero_only_logger, setup_gpus
 from src.utils.profiler import build_profiler
+from src.utils.data_source import is_aligned_irvis
 from src.lightning.data import MultiSceneDataModule
 from src.lightning.lightning_loftr import PL_LoFTR
 import torch
@@ -152,11 +153,19 @@ def main():
     callbacks = [lr_monitor]
 
     # Pick monitored metric + filename template based on the dataset.
-    # ScanNet/MegaDepth use the geometric AUC@10; RoadScene has no camera
-    # geometry so we monitor pixel precision@3px logged by PL_LoFTR. Computed
-    # outside the ckpt/EarlyStopping branches so both callbacks can share it
-    # (and EarlyStopping can be enabled even when --disable_ckpt is set).
-    if config.DATASET.TRAINVAL_DATA_SOURCE == 'RoadScene':
+    # ScanNet/MegaDepth use the geometric AUC@10; aligned IR-VIS sources
+    # (RoadScene / M3FD / any future entry in ALIGNED_IRVIS_SOURCES) have no
+    # camera geometry, so we monitor the pixel precision@3px logged by
+    # PL_LoFTR's _compute_roadscene_metrics. Dispatch must go through
+    # is_aligned_irvis() -- never compare the source name as a literal,
+    # otherwise adding a new IR-VIS dataset silently falls into the
+    # auc@10 branch and crashes EarlyStopping at the first val epoch
+    # (RuntimeError: Early stopping conditioned on metric `auc@10` which is
+    # not available). See eloftr-m3fd-data SKILL.md SS7 for the rule.
+    # Computed outside the ckpt/EarlyStopping branches so both callbacks can
+    # share it (and EarlyStopping can be enabled even when --disable_ckpt
+    # is set).
+    if is_aligned_irvis(config.DATASET.TRAINVAL_DATA_SOURCE):
         monitor_metric = 'precision@3px'
         monitor_mode = 'max'
         filename_tpl = '{epoch}-{precision@1px:.3f}-{precision@3px:.3f}-{precision@5px:.3f}'

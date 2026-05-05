@@ -23,6 +23,7 @@ from src.utils.plotting import make_matching_figures
 from src.utils.comm import gather, all_gather
 from src.utils.misc import lower_config, flattenList
 from src.utils.profiler import PassThroughProfiler
+from src.utils.data_source import is_aligned_irvis
 
 from torch.profiler import profile
 
@@ -301,7 +302,7 @@ class PL_LoFTR(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         self._trainval_inference(batch)
 
-        is_roadscene = batch['dataset_name'][0].lower() == 'roadscene'
+        is_roadscene = is_aligned_irvis(batch['dataset_name'][0])
         if is_roadscene:
             ret_dict = self._compute_roadscene_metrics(batch)
         else:
@@ -324,7 +325,7 @@ class PL_LoFTR(pl.LightningModule):
         multi_outputs = [outputs] if not isinstance(outputs[0], (list, tuple)) else outputs
         multi_val_metrics = defaultdict(list)
 
-        is_roadscene = self.config.DATASET.TRAINVAL_DATA_SOURCE == 'RoadScene'
+        is_roadscene = is_aligned_irvis(self.config.DATASET.TRAINVAL_DATA_SOURCE)
         roadscene_thresholds = (1.0, 3.0, 5.0)
 
         for valset_idx, outputs in enumerate(multi_outputs):

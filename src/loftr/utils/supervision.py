@@ -6,6 +6,7 @@ import torch.nn.functional as F
 from einops import rearrange, repeat
 from kornia.utils import create_meshgrid
 from src.utils.plotting import make_matching_figures
+from src.utils.data_source import is_aligned_irvis
 
 from .geometry import warp_kpts
 
@@ -252,7 +253,7 @@ def compute_supervision_coarse(data, config):
     data_source = data['dataset_name'][0]
     if data_source.lower() in ['scannet', 'megadepth']:
         spvs_coarse(data, config)
-    elif data_source.lower() == 'roadscene':
+    elif is_aligned_irvis(data_source):
         spvs_coarse_roadscene(data, config)
     else:
         raise ValueError(f'Unknown data source: {data_source}')
@@ -501,7 +502,7 @@ def compute_supervision_fine(data, config, logger=None):
     data_source = data['dataset_name'][0]
     if data_source.lower() in ['scannet', 'megadepth']:
         spvs_fine(data, config, logger)
-    elif data_source.lower() == 'roadscene':
+    elif is_aligned_irvis(data_source):
         spvs_fine_roadscene(data, config, logger)
     else:
         raise NotImplementedError

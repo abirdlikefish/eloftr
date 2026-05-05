@@ -43,8 +43,12 @@ Output ``data`` dict:
     orig_scale1     : torch.float32 (2,), same for VIS.
     homography_0to1 : torch.float32 (3, 3), maps image0 px -> image1 px in
                        the padded-image coordinate frame.
-    dataset_name    : str, always 'RoadScene'
-    scene_id        : str, always 'RoadScene'
+    dataset_name    : str, value of the constructor's ``dataset_name`` arg
+                       (default 'RoadScene'). Used by the IR-VIS dispatch
+                       sites; must be a key registered in
+                       ``src.utils.data_source.ALIGNED_IRVIS_SOURCES``
+                       (case-insensitive).
+    scene_id        : str, same as ``dataset_name``
     pair_id         : int
     pair_names      : tuple(str, str), (ir_path, vis_path)
 """
@@ -138,10 +142,16 @@ class RoadSceneDataset(utils_data.Dataset):
     """RoadScene IR-VIS dataset with optional Homography augmentation.
 
     Args:
-        root_dir: Root of the RoadScene download.
+        root_dir: Root of the dataset download (RoadScene, M3FD, ...).
         list_path: Path to the txt index file produced by
-            ``MyScripts/make_roadscene_splits.py``.
+            ``MyScripts/make_<dataset>_splits.py``.
         mode: ``'train'`` / ``'val'`` / ``'test'``.
+        dataset_name: Value written into ``data['dataset_name']`` /
+            ``data['scene_id']``. Default ``'RoadScene'`` keeps every
+            existing call site identical; set to ``'M3FD'`` (or any other
+            name registered in
+            ``src.utils.data_source.ALIGNED_IRVIS_SOURCES``) when reusing
+            this class for a different aligned IR-VIS dataset.
         ir_subdir / vis_subdir: Sub-folder names under ``root_dir``.
         img_resize: Target size for ``max(H, W)`` of each image after
             aspect-ratio-preserving resize (before padding).
@@ -164,6 +174,7 @@ class RoadSceneDataset(utils_data.Dataset):
                  root_dir: str,
                  list_path: str,
                  mode: str = "train",
+                 dataset_name: str = "RoadScene",
                  ir_subdir: str = "cropinfrared",
                  vis_subdir: str = "crop_LR_visible",
                  img_resize: Optional[int] = 480,
@@ -186,6 +197,7 @@ class RoadSceneDataset(utils_data.Dataset):
         self.root_dir = root_dir
         self.list_path = list_path
         self.mode = mode
+        self.dataset_name = str(dataset_name)
         self.ir_dir = osp.join(root_dir, ir_subdir)
         self.vis_dir = osp.join(root_dir, vis_subdir)
         self.img_resize = int(img_resize)
@@ -312,8 +324,8 @@ class RoadSceneDataset(utils_data.Dataset):
             "orig_scale0": orig_scale0,
             "orig_scale1": orig_scale1,
             "homography_0to1": H_t,
-            "dataset_name": "RoadScene",
-            "scene_id": "RoadScene",
+            "dataset_name": self.dataset_name,
+            "scene_id": self.dataset_name,
             "pair_id": idx,
             "pair_names": (ir_rel, vis_rel),
         }

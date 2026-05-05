@@ -23,6 +23,7 @@ from src.utils.augment import build_augmentor
 from src.utils.dataloader import get_local_split
 from src.utils.misc import tqdm_joblib
 from src.utils import comm
+from src.utils.data_source import is_aligned_irvis
 from src.datasets.megadepth import MegaDepthDataset
 from src.datasets.scannet import ScanNetDataset
 from src.datasets.roadscene import RoadSceneDataset
@@ -218,16 +219,20 @@ class MultiSceneDataModule(pl.LightningDataModule):
                        min_overlap_score=0.,
                        pose_dir=None):
         """ Setup train / val / test set"""
-        # RoadScene uses a single flat txt list of image filenames rather than
-        # per-scene .npz files, so we short-circuit the per-scene iteration
-        # used by ScanNet/MegaDepth and build one RoadSceneDataset directly.
+        # Aligned IR-VIS datasets (RoadScene, M3FD, ...) use a single flat txt
+        # list of image filenames rather than per-scene .npz files, so we
+        # short-circuit the per-scene iteration used by ScanNet/MegaDepth and
+        # build one RoadSceneDataset directly. Membership is decided by
+        # ``src.utils.data_source.is_aligned_irvis`` so adding a new dataset
+        # is a one-line change to ``ALIGNED_IRVIS_SOURCES``.
         data_source = self.trainval_data_source if mode in ['train', 'val'] else self.test_data_source
-        if str(data_source).lower() == 'roadscene':
-            logger.info(f'[rank {self.rank}]: building RoadSceneDataset from {scene_list_path}')
+        if is_aligned_irvis(data_source):
+            logger.info(f'[rank {self.rank}]: building RoadSceneDataset (dataset_name={data_source}) from {scene_list_path}')
             ds = RoadSceneDataset(
                 root_dir=data_root,
                 list_path=scene_list_path,
                 mode=mode,
+                dataset_name=str(data_source),
                 ir_subdir=self.road_ir_subdir,
                 vis_subdir=self.road_vis_subdir,
                 img_resize=self.road_img_resize,

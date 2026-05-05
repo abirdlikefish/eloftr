@@ -1,9 +1,11 @@
 ---
 name: eloftr-roadscene-data
-description: Integrate the RoadScene IR-VIS dataset into EfficientLoFTR for cross-modal matching. Use when the user mentions RoadScene, cropinfrared, crop_LR_visible / crop_HR_visible, RoadSceneDataset, A3 padding, ROAD_PAD_SIZE, Homography augmentation, mask propagation bugs, "Trying to resize storage", "Calculated padded input size", or asks how to add a custom IR-VIS dataset that returns mask0/mask1/homography_0to1.
+description: Integrate the RoadScene IR-VIS dataset (and any other aligned IR-VIS dataset reusing the same I/O class) into EfficientLoFTR for cross-modal matching. Use when the user mentions RoadScene, cropinfrared, crop_LR_visible / crop_HR_visible, RoadSceneDataset, A3 padding, ROAD_PAD_SIZE, Homography augmentation, mask propagation bugs, "Trying to resize storage", "Calculated padded input size", asks how to add a custom IR-VIS dataset that returns mask0/mask1/homography_0to1, or asks how data_source dispatch works for aligned IR-VIS datasets (RoadScene + M3FD share RoadSceneDataset / spvs_*_roadscene / _compute_roadscene_metrics via is_aligned_irvis / ALIGNED_IRVIS_SOURCES).
 ---
 
 # RoadScene IR-VIS 数据集集成（Solution A3）
+
+> 注：自从引入"对齐 IR-VIS 白名单"机制后，本 skill 描述的 `RoadSceneDataset` 与全套 IR-VIS 监督 / metric / plotting 路径**已经不再只服务 RoadScene 本身**——M3FD（以及未来的 MSRS / LLVIP / TNO）通过 `configs/data/<name>_trainval.py` 复用同一套代码。具体见下方第 2.5 节"对齐 IR-VIS 白名单机制"。新接入数据集时优先看那一节，再回到本 skill 处理 padding / mask / Bug 等通用问题。M3FD 的接入细节单独看 [eloftr-m3fd-data](../eloftr-m3fd-data/SKILL.md)。
 
 ## ⚠️ 必读：HR vs LR 对齐陷阱
 
@@ -50,9 +52,50 @@ description: Integrate the RoadScene IR-VIS dataset into EfficientLoFTR for cros
 
 ## 2. data 模块的 short-circuit 分支
 
-[src/lightning/data.py:221-251](../../../src/lightning/data.py) 在 `_setup_dataset` 里给 `data_source == 'roadscene'` 加了一个早 return 分支，跳过 ScanNet/MegaDepth 的 per-scene `.npz` 迭代，直接用一个 `RoadSceneDataset`。所有 `ROAD_*` 字段都在 `__init__` 里 `getattr` 拿到，包括 `ROAD_PAD_SIZE`、`ROAD_HOMOGRAPHY_AUG / PROB / KWARGS`。
+[src/lightning/data.py:221-251](../../../src/lightning/data.py) 在 `_setup_dataset` 里给"对齐 IR-VIS"数据源加了一个早 return 分支，跳过 ScanNet/MegaDepth 的 per-scene `.npz` 迭代，直接用一个 `RoadSceneDataset`。判断走 `is_aligned_irvis(data_source)`（见第 2.5 节），所以 `'RoadScene'` / `'M3FD'` / 未来加进白名单的任何名字都会走这条分支。所有 `ROAD_*` 字段都在 `__init__` 里 `getattr` 拿到，包括 `ROAD_PAD_SIZE`、`ROAD_HOMOGRAPHY_AUG / PROB / KWARGS`，所以**字段名虽然带 `ROAD_` 前缀，但语义已经是"对齐 IR-VIS 通用开关"**，不要因为名字误以为它仅适用于 RoadScene。
 
 `homography_aug=(self.road_homography_aug and mode == 'train')` 这一行决定了 val/test 一定不增强；评估脚本想强制开 Homography 必须自己改 `mode`（见 `eloftr-eval-pipeline` skill）。
+
+`RoadSceneDataset` 的 `dataset_name` 参数（默认 `'RoadScene'`）由 `data.py` 在调用时透传 `dataset_name=str(data_source)` 注入；`__getitem__` 把它写进输出 dict 的 `dataset_name` / `scene_id` 字段，下游 dispatch 再从 batch 字段读到这个值。
+
+## 2.5 对齐 IR-VIS 白名单机制
+
+**单一可信源**：[src/utils/data_source.py](../../../src/utils/data_source.py)
+
+```python
+ALIGNED_IRVIS_SOURCES = frozenset({"roadscene", "m3fd"})
+
+def is_aligned_irvis(name) -> bool:
+    if name is None:
+        return False
+    return str(name).lower() in ALIGNED_IRVIS_SOURCES
+```
+
+**5 处 dispatch 全部走 `is_aligned_irvis(...)`**——任何新加判断必须也走它，**禁止再写 `== 'roadscene'` 或 `lower() == 'roadscene'` 这种字面量比较**：
+
+| # | 位置 | 作用 |
+|---|---|---|
+| 1 | [src/lightning/data.py:225](../../../src/lightning/data.py) | dataset short-circuit（不走 npz） |
+| 2 | [src/loftr/utils/supervision.py](../../../src/loftr/utils/supervision.py) `compute_supervision_coarse` | dispatch 到 `spvs_coarse_roadscene` |
+| 3 | [src/loftr/utils/supervision.py](../../../src/loftr/utils/supervision.py) `compute_supervision_fine` | dispatch 到 `spvs_fine_roadscene` |
+| 4 | [src/lightning/lightning_loftr.py](../../../src/lightning/lightning_loftr.py) `validation_step` | 走 `_compute_roadscene_metrics` |
+| 5 | [src/lightning/lightning_loftr.py](../../../src/lightning/lightning_loftr.py) `validation_epoch_end` | 走 `_aggregate_roadscene_metrics` + log `precision@{1,3,5}px` |
+| 6 | [src/utils/plotting.py](../../../src/utils/plotting.py) `_compute_conf_thresh` | 用 px 阈值 (3.0) 而不是 epipolar 阈值 |
+| 7 | [src/utils/plotting.py](../../../src/utils/plotting.py) `make_matching_figures` | 走 `_make_evaluation_figure_roadscene` |
+
+变量名仍写 `is_roadscene` 是为了最小化 git diff，**语义已经是"是否为对齐 IR-VIS"**。
+
+**[src/loftr/utils/supervision.py:251](../../../src/loftr/utils/supervision.py) 的 `assert len(set(data['dataset_name'])) == 1`** 故意保留：单 batch 内不允许混 RoadScene + M3FD 样本（监督函数本身写得能处理任何对齐 IR-VIS 数据，但当前 lightning data 模块没准备好"per-batch 同源采样"）。**未来**做联合训练再单独立项放宽。
+
+### 加新对齐 IR-VIS 数据集的标准 3 步
+
+不论 MSRS、LLVIP、TNO 还是其他数据集，全程**不要触碰 5 处 dispatch 中的任何一处**：
+
+1. 把数据放成 `data/<NAME>/<ir_dir>/<id>.<ext>` + `data/<NAME>/<vis_dir>/<id>.<ext>`，文件名一一对应。
+2. 在 [src/utils/data_source.py](../../../src/utils/data_source.py) 的 `ALIGNED_IRVIS_SOURCES` 里加上数据集小写名（如 `'msrs'`）。
+3. 复制 [configs/data/m3fd_trainval.py](../../../configs/data/m3fd_trainval.py) → `configs/data/<name>_trainval.py`，改 `M3FD_PATH`、`TRAINVAL_DATA_SOURCE`、`ROAD_IR_SUBDIR`、`ROAD_VIS_SUBDIR`，必要时改 `ROAD_IMG_RESIZE` / `ROAD_PAD_SIZE`。
+
+可选：若文件名结构不同，复制 [MyScripts/make_m3fd_splits.py](../../../MyScripts/make_m3fd_splits.py) → `make_<name>_splits.py`，改默认 `--root` / `--ir_subdir` / `--vis_subdir` / `--ext`。
 
 ## 3. Homography 监督
 
@@ -150,4 +193,6 @@ elif mask_w0 != mask_W0:                                                    # �
 | `Calculated padded input size per channel: (36 x 0)` | Bug A，mask 经 Homography 后非矩形 | 第 4 节 Bug A |
 | `Sizes of tensors must match except in dimension 1/2. Expected size N but got size N+k` | Bug B，双维度都被裁但只 pad 了一维 | 第 4 节 Bug B |
 | 训练 val `precision@3px` 高于独立 eval 很多 | HR vs LR 用错了 + pipeline 不一致 | 顶部红警 + `eloftr-eval-pipeline` skill |
-| `KeyError: 'depth0'` / `'T_0to1'` | 监督函数走到了 ScanNet/MegaDepth 分支 | 确认 `cfg.DATASET.TRAINVAL_DATA_SOURCE = "RoadScene"`，dispatch 才会指到 `spvs_*_roadscene` |
+| `KeyError: 'depth0'` / `'T_0to1'` | 监督函数走到了 ScanNet/MegaDepth 分支，说明 `is_aligned_irvis(data_source)` 返回了 `False` | 确认 `cfg.DATASET.TRAINVAL_DATA_SOURCE` 的小写名在 [src/utils/data_source.py](../../../src/utils/data_source.py) `ALIGNED_IRVIS_SOURCES` 里。新加数据集必须先把名字加进白名单（第 2.5 节标准 3 步） |
+| 启动日志没有 `building RoadSceneDataset (dataset_name=...) from ...` | data.py short-circuit 没匹配到 | 同上，检查 `TRAINVAL_DATA_SOURCE` 拼写大小写无所谓但小写形式必须在白名单里 |
+| 监督函数 `assert len(set(data['dataset_name'])) == 1` 触发 | 单 batch 里混了多个数据源 | 不要把多个 `RoadSceneDataset(dataset_name=...)` 直接 `ConcatDataset` 用 `RandomSampler`；联合训练目前未支持，参见第 2.5 节末尾 |

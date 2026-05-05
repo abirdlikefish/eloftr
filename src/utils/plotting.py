@@ -5,13 +5,16 @@ import matplotlib
 
 import torch
 
+from src.utils.data_source import is_aligned_irvis
+
+
 def _compute_conf_thresh(data):
     dataset_name = data['dataset_name'][0].lower()
     if dataset_name == 'scannet':
         thr = 5e-4
     elif dataset_name == 'megadepth':
         thr = 1e-4
-    elif dataset_name == 'roadscene':
+    elif is_aligned_irvis(dataset_name):
         # interpreted as a pixel threshold for the visualization colormap
         thr = 3.0
     else:
@@ -154,7 +157,7 @@ def make_matching_figures(data, config, mode='evaluation'):
     """
     assert mode in ['evaluation', 'confidence', 'gt']  # 'confidence'
     figures = {mode: []}
-    is_roadscene = data['dataset_name'][0].lower() == 'roadscene'
+    is_roadscene = is_aligned_irvis(data['dataset_name'][0])
     for b_id in range(data['image0'].size(0)):
         if mode == 'evaluation':
             if is_roadscene:
