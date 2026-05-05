@@ -3,8 +3,9 @@ REM ============================================================
 REM  view_training.bat
 REM  Usage:
 REM    view_training.bat X [Y]
-REM      X : version number (1, 2, 3, ...) -> matches logs\tb_logs\*_vX_*
-REM          (auto-detects dataset prefix: roadscene_v1..v4, m3fd_v5+, ...)
+REM      X : version number, supports sub-versions: 6_1 or 6.1 (normalized
+REM          internally to 6_1). Matches logs\tb_logs\*_vX_*.
+REM          Auto-detects dataset prefix: roadscene_v1..v4, m3fd_v5+, ...
 REM      Y : run type (optional, default = 3)
 REM            1 = debug   -> *_vX_debug
 REM            2 = small   -> *_vX_small
@@ -26,6 +27,9 @@ REM
 REM    NOTE: assumes each version number maps to a single dataset (current
 REM    convention: v1..v4 = roadscene, v5+ = m3fd). If a version ever exists
 REM    under multiple datasets, this picks the first one for /d returns.
+REM    Sub-versions (e.g. v6_1) are treated as DISTINCT from their parent
+REM    (v6) via a post-filter that rejects any *_vX_<digit>... match, so
+REM    `view_training.bat 6` will never accidentally open v6_1's logs.
 REM
 REM  Examples:
 REM    view_training.bat 1        -> open final run of v1 (roadscene_v1_contrast)
@@ -33,6 +37,9 @@ REM    view_training.bat 4        -> open final run of v4 (roadscene_v4_combined
 REM    view_training.bat 5        -> open final run of v5 (m3fd_v5_combined)
 REM    view_training.bat 5 1      -> open debug run of v5 (m3fd_v5_debug)
 REM    view_training.bat 5 2      -> open small run of v5 (m3fd_v5_small)
+REM    view_training.bat 6        -> open final run of v6 (m3fd_v6_finetune)
+REM    view_training.bat 6_1      -> open final run of v6_1 (m3fd_v6_1_finetune)
+REM    view_training.bat 6.1      -> same as `view_training.bat 6_1`
 REM ============================================================
 
 setlocal enabledelayedexpansion
@@ -46,14 +53,31 @@ REM ---- read inputs --------------------------------------------------------
 set "X=%~1"
 set "Y=%~2"
 
+REM If launched without args (e.g. double-click), prompt once for the whole
+REM "X [Y]" line. We read into a buffer and split on space/comma rather than
+REM letting set /p drop the entire line into X -- otherwise typing "6 0" at
+REM the prompt would set X="6 0" and the *_v6 0_* glob would silently miss.
+REM Y is only filled from the prompt if it wasn't already passed as %~2.
 if "%X%"=="" (
-    set /p X="Enter version number X (e.g. 1, 2, 3): "
+    set "_input="
+    set /p _input="Enter X [Y] (e.g. '6 1' / '6_1' / '6.1'; X required, Y optional 1=debug 2=small 3=final): "
+    if not "!_input!"=="" (
+        for /f "tokens=1,2 delims=, " %%a in ("!_input!") do (
+            set "X=%%a"
+            if "%Y%"=="" set "Y=%%b"
+        )
+    )
 )
 if "%X%"=="" (
     echo [ERROR] version number X is required.
     pause
     exit /b 1
 )
+
+REM Accept sub-version in either underscore (6_1) or dot (6.1) form;
+REM internally we always use underscore form to match dir naming.
+REM This is a no-op when X has no dot, so plain "5", "6" etc. still work.
+set "X=%X:.=_%"
 
 if "%Y%"=="" set "Y=3"
 
@@ -78,13 +102,24 @@ if "%Y%"=="1" (
 set "EXP="
 for /d %%D in ("%LOGS_DIR%\*_v%X%_*") do (
     set "name=%%~nxD"
-    if "!WANT_FINAL!"=="1" (
-        set "is_test=0"
-        if /i "!name:~-6!"=="_debug" set "is_test=1"
-        if /i "!name:~-6!"=="_small" set "is_test=1"
-        if "!is_test!"=="0" if "!EXP!"=="" set "EXP=!name!"
-    ) else (
-        if /i "!name:~-6!"=="!WANT_SUFFIX!" if "!EXP!"=="" set "EXP=!name!"
+    REM Strip everything up to and including `_v{X}_` to inspect the kind suffix.
+    REM If that suffix starts with a digit, this is a *sub-version* match
+    REM (e.g. X=6 hitting m3fd_v6_1_finetune), so skip it. Without this filter
+    REM, `view_training.bat 6` would non-deterministically open either
+    REM m3fd_v6_finetune or m3fd_v6_1_finetune depending on FS order.
+    set "tail=!name:*_v%X%_=!"
+    set "first=!tail:~0,1!"
+    set "is_subver=0"
+    for %%C in (0 1 2 3 4 5 6 7 8 9) do if "!first!"=="%%C" set "is_subver=1"
+    if "!is_subver!"=="0" (
+        if "!WANT_FINAL!"=="1" (
+            set "is_test=0"
+            if /i "!name:~-6!"=="_debug" set "is_test=1"
+            if /i "!name:~-6!"=="_small" set "is_test=1"
+            if "!is_test!"=="0" if "!EXP!"=="" set "EXP=!name!"
+        ) else (
+            if /i "!name:~-6!"=="!WANT_SUFFIX!" if "!EXP!"=="" set "EXP=!name!"
+        )
     )
 )
 

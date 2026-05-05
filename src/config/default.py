@@ -227,6 +227,16 @@ _CN.TRAINER.SB_REPEAT = 1  # repeat N times for training the sampled data
 _CN.TRAINER.RDM_REPLACEMENT = True
 _CN.TRAINER.RDM_NUM_SAMPLES = None
 
+# Opt-in DataLoader performance flag. When True, workers are kept alive
+# across epochs (saves spin-up overhead, ~30s/epoch with num_workers=6).
+# Default False to preserve v0-v5's bytes-identical augmentation RNG
+# sequence on retrain: RoadScene/M3FD use np.random.rand() in __getitem__
+# (src/datasets/roadscene.py:249) without any worker_init_fn, so persistent
+# workers would let numpy state accumulate across epochs -- statistically
+# equivalent but not bytes-identical. Each v_x config opts in explicitly
+# (currently only configs/loftr/eloftr_full_v6_finetune.py).
+_CN.TRAINER.PERSISTENT_WORKERS = False
+
 # EarlyStopping callback (added by train.py when ENABLED). Reuses the same
 # monitor / mode as ModelCheckpoint, so for RoadScene it watches
 # `precision@3px` (mode=max) and for ScanNet/MegaDepth it watches `auc@10`.

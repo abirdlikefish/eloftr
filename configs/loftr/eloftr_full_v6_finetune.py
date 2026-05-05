@@ -96,6 +96,53 @@ Schedule changes (vs v5)
         ~5x more updates at the slower LR.
 
 ==============================================================================
+Performance overrides (v6-only opt-in via cfg, no architectural impact)
+------------------------------------------------------------------------------
+Both flags default to False/32 in src/config/default.py. v6 is the FIRST
+config to opt in; v0-v5 keep defaults so retraining them stays bytes-
+identical to history.
+
+  PERSISTENT_WORKERS (override): False (default) -> True
+        Keep DataLoader workers alive across all 50 epoch instead of
+        re-spawning each epoch. Saves ~25min on v6 (50 epoch x ~30s
+        spin-up at num_workers=6).
+
+        Trade-off: RoadSceneDataset uses np.random.rand() in __getitem__
+        (src/datasets/roadscene.py:249) and np.random.default_rng() to
+        sample Homography params (roadscene.py:104). The project has NO
+        worker_init_fn anywhere (grep verified), so PyTorch's default
+        worker init only seeds torch.manual_seed -- NOT np.random.
+
+        Consequence: with persistent_workers=True the per-worker numpy
+        RNG state accumulates across epochs (a worker is forked once,
+        never re-init'd). With persistent_workers=False (the historical
+        default) the worker is re-spawned each epoch, so numpy state is
+        re-fork'd from the main process each epoch. The two paths produce
+        statistically equivalent but NOT bytes-identical augmentation
+        sequences from epoch 1 onward.
+
+        Acceptable for v6 because v6 is a single end-to-end run, not a
+        bytes-identical reproducibility target. v0-v5 keep default False
+        so any future retrain of v0-v5 reproduces history exactly.
+
+        If we ever need v6 also bytes-identical, add a worker_init_fn in
+        src/datasets/roadscene.py that explicitly seeds np.random per
+        worker per epoch (deferred to a future v7+ if needed).
+
+  N_VAL_PAIRS_TO_PLOT (override): 32 -> 1
+        v6 has 50 epoch x ~35 val figures/epoch = 1750 figures total at
+        default N_VAL_PAIRS_TO_PLOT=32. Each figure is a matplotlib +
+        add_figure call, ~3-5s per figure. Reducing to 1 keeps a single
+        sanity figure per epoch (50 total) and shrinks TB events file
+        by ~70%, saves ~25min.
+
+        ENABLE_PLOTTING (already False, set by configs/data/m3fd_trainval.py:73)
+        controls TRAIN-time plotting in lightning_loftr.py:285.
+        N_VAL_PAIRS_TO_PLOT controls VAL-time plotting in
+        lightning_loftr.py:311. They are orthogonal -- both must be set
+        to fully suppress figure overhead.
+
+==============================================================================
 Inherited unchanged (do NOT re-set these in v6 -- yacs merge order pitfall)
 ------------------------------------------------------------------------------
 From v5_m3fd:
@@ -193,3 +240,7 @@ cfg.TRAINER.CANONICAL_LR            = 4e-4         # v5=2e-3; TRUE_LR = 4e-4 * 4
 cfg.TRAINER.WARMUP_STEP             = 50           # v5=20; auto-scales to 800 abs step ~0.85 epoch
 cfg.TRAINER.MSLR_MILESTONES         = [15, 25, 35] # v5=[3,5,7]; full LR for first 15 epoch
 cfg.TRAINER.EARLY_STOPPING_PATIENCE = 12           # v5=3; slow refinement needs higher tolerance
+
+# Performance overrides (v6-only opt-in; v0-v5 keep defaults for bytes-identical retraining; see docstring "Performance overrides" section)
+cfg.TRAINER.PERSISTENT_WORKERS      = True         # default False; keep workers alive across 50 epoch, saves ~25min
+cfg.TRAINER.N_VAL_PAIRS_TO_PLOT     = 1            # default 32; v6 50 epoch x 35 figs/epoch -> 1750 figs; keep 1 sanity, shrinks TB by ~70%

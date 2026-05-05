@@ -93,16 +93,25 @@ class MultiSceneDataModule(pl.LightningDataModule):
         self.fp16 = config.DATASET.FP16
 
         # 3.loader parameters
+        # ``persistent_workers`` is gated by cfg.TRAINER.PERSISTENT_WORKERS
+        # (default False, set in src/config/default.py). v0-v5 configs do
+        # not opt in, so loader behaviour stays bytes-identical to history;
+        # only v6_finetune.py opts in explicitly. The ``args.num_workers > 0``
+        # guard avoids PyTorch's "persistent_workers requires num_workers > 0"
+        # error in debug bats that pass --num_workers=0.
+        _persistent = bool(getattr(config.TRAINER, 'PERSISTENT_WORKERS', False)) and args.num_workers > 0
         self.train_loader_params = {
             'batch_size': args.batch_size,
             'num_workers': args.num_workers,
-            'pin_memory': getattr(args, 'pin_memory', True)
+            'pin_memory': getattr(args, 'pin_memory', True),
+            'persistent_workers': _persistent,
         }
         self.val_loader_params = {
             'batch_size': 1,
             'shuffle': False,
             'num_workers': args.num_workers,
-            'pin_memory': getattr(args, 'pin_memory', True)
+            'pin_memory': getattr(args, 'pin_memory', True),
+            'persistent_workers': _persistent,
         }
         self.test_loader_params = {
             'batch_size': 1,

@@ -9,11 +9,13 @@ REM  Usage:
 REM    eval_roadscene_finetuned.bat X [Y] [Z]
 REM
 REM  Inputs (all support -1 as "use default"):
-REM    X : version number (1, 2, 3, 4, 5, ...)
-REM          -> resolves to logs\tb_logs\<dataset>_vX_<final>
+REM    X : version number, supports sub-versions: 6_1 or 6.1 (normalized
+REM          internally to 6_1). Plain integers 1, 2, ..., 5, 6 also work.
+REM          -> resolves to logs\tb_logs\*_vX_<final>
 REM             (dataset prefix is auto-detected; v1..v4 = roadscene_,
-REM              v5 = m3fd_, future versions may use other prefixes)
+REM              v5+ = m3fd_, future versions may use other prefixes)
 REM          -> auto-skips _debug / _small experiments
+REM          -> auto-skips sub-version siblings (X=6 will not pick v6_1)
 REM          -> required (no real default; -1 is treated as missing)
 REM    Y : lightning version_Y under that experiment (optional)
 REM          -> default = highest-numbered version_N
@@ -27,8 +29,12 @@ REM  Note: positional args naturally enforce "Z requires Y";
 REM        if you want default Y but custom Z, pass Y=-1.
 REM
 REM  cfg picked: configs\loftr\eloftr_full_vX_*.py
-REM              (auto-glob; if multiple match for the same X, the first
-REM               alphabetical match is used and a warning is printed)
+REM              (auto-glob with the same sub-version skip filter; X=6 picks
+REM               v6_finetune.py and ignores v6_1_finetune.py, X=6_1 picks
+REM               v6_1_finetune.py)
+REM
+REM  Output dir: dump\roadscene_eval_v<X>_version<Y>_<topZ|last>
+REM              (e.g. dump\roadscene_eval_v6_1_version0_top1)
 REM
 REM  Examples:
 REM    eval_roadscene_finetuned.bat 3              -> v3, latest version, best p@3px
@@ -36,6 +42,8 @@ REM    eval_roadscene_finetuned.bat 2 1            -> v2, version_1, best p@3px
 REM    eval_roadscene_finetuned.bat 4 -1 6         -> v4, latest version, last.ckpt
 REM    eval_roadscene_finetuned.bat 3 2 3          -> v3, version_2, 3rd best p@3px
 REM    eval_roadscene_finetuned.bat 5              -> v5 m3fd-trained, eval on RoadScene
+REM    eval_roadscene_finetuned.bat 6_1            -> v6_1, latest version, best p@3px
+REM    eval_roadscene_finetuned.bat 6.1 -1 6       -> v6_1, latest version, last.ckpt
 REM ============================================================
 
 setlocal enabledelayedexpansion
@@ -57,7 +65,7 @@ REM separated by spaces or commas; missing tokens stay at their cmdline /
 REM default values.
 if "%X%"=="" (
     set "_input="
-    set /p _input="Enter X [Y] [Z] (e.g. '2 1' or '3 -1 6'; -1 = use default): "
+    set /p _input="Enter X [Y] [Z] (e.g. '2 1', '6_1 -1 6' or '3 -1 6'; -1 = use default): "
     if not "!_input!"=="" (
         for /f "tokens=1,2,3 delims=, " %%a in ("!_input!") do (
             set "X=%%a"
@@ -78,6 +86,11 @@ if "%X%"=="" (
     exit /b 1
 )
 
+REM Accept sub-version in either underscore (6_1) or dot (6.1) form;
+REM internally we always use underscore form to match dir naming.
+REM This is a no-op when X has no dot, so plain "5", "6" etc. still work.
+set "X=%X:.=_%"
+
 REM Default Z = 1 (best p@3px)
 if "%Z%"=="" set "Z=1"
 
@@ -90,16 +103,23 @@ if "!VALID_Z!"=="0" (
     exit /b 1
 )
 
-REM ---- resolve experiment directory (skip _debug / _small) ----------------
+REM ---- resolve experiment directory (skip _debug / _small + sub-versions) -
 REM Glob pattern *_vX_* matches any dataset prefix (roadscene_, m3fd_, ...).
+REM Sub-version skip: when X=6, *_v6_* greedy-matches m3fd_v6_1_finetune
+REM whose tail (after _v6_) starts with `1`. Reject those so X=6 never
+REM accidentally picks v6_1's logs (and vice versa).
 set "EXP="
 for /d %%D in ("%LOGS_DIR%\*_v%X%_*") do (
     set "name=%%~nxD"
-    set "is_test=0"
-    if /i "!name:~-6!"=="_debug" set "is_test=1"
-    if /i "!name:~-6!"=="_small" set "is_test=1"
-    if "!is_test!"=="0" (
-        if "!EXP!"=="" set "EXP=!name!"
+    set "tail=!name:*_v%X%_=!"
+    set "first=!tail:~0,1!"
+    set "is_subver=0"
+    for %%C in (0 1 2 3 4 5 6 7 8 9) do if "!first!"=="%%C" set "is_subver=1"
+    if "!is_subver!"=="0" (
+        set "is_test=0"
+        if /i "!name:~-6!"=="_debug" set "is_test=1"
+        if /i "!name:~-6!"=="_small" set "is_test=1"
+        if "!is_test!"=="0" if "!EXP!"=="" set "EXP=!name!"
     )
 )
 
@@ -187,14 +207,25 @@ REM ---- cfg ----------------------------------------------------------------
 REM Glob configs\loftr\eloftr_full_vX_*.py rather than deriving from EXP
 REM name, because v5+ uses dataset-tagged configs (e.g. v5_m3fd) while the
 REM experiment dir uses an architecture suffix (e.g. m3fd_v5_combined).
+REM Sub-version skip: when X=6, eloftr_full_v6_*.py matches both
+REM v6_finetune.py and v6_1_finetune.py; reject the latter so X=6 picks
+REM only v6_finetune.py (and X=6_1 picks only v6_1_finetune.py).
 set "FT_CFG="
 set "N_CFG=0"
 for %%F in ("configs\loftr\eloftr_full_v%X%_*.py") do (
-    set /a "N_CFG+=1"
-    if "!FT_CFG!"=="" set "FT_CFG=%%~F"
+    set "cname=%%~nF"
+    set "ctail=!cname:*eloftr_full_v%X%_=!"
+    set "cfirst=!ctail:~0,1!"
+    set "cis_subver=0"
+    for %%C in (0 1 2 3 4 5 6 7 8 9) do if "!cfirst!"=="%%C" set "cis_subver=1"
+    if "!cis_subver!"=="0" (
+        set /a "N_CFG+=1"
+        if "!FT_CFG!"=="" set "FT_CFG=%%~F"
+    )
 )
 if "!FT_CFG!"=="" (
     echo [ERROR] no cfg matching configs\loftr\eloftr_full_v%X%_*.py
+    echo         ^(sub-version siblings, if any, are skipped on purpose^)
     pause
     exit /b 1
 )
@@ -209,13 +240,9 @@ if not exist "!FT_CFG!" (
     exit /b 1
 )
 
-REM OUT_DIR tag: strip leading "roadscene_" so v1..v4 dump paths stay the
-REM same as before; for any other dataset prefix (m3fd_, ...) keep the full
-REM EXP name to distinguish cross-dataset evals.
-set "EXP_TAIL=!EXP!"
-if /i "!EXP_TAIL:~0,10!"=="roadscene_" set "EXP_TAIL=!EXP_TAIL:~10!"
-
-set "OUT_DIR=dump\roadscene_eval_!EXP_TAIL!_version!Y!_!Z_TAG!"
+REM Unified OUT_DIR naming: dump\roadscene_eval_v<X>_version<Y>_<Z_TAG>.
+REM X is already normalised to underscore form (6_1) so dirs are stable.
+set "OUT_DIR=dump\roadscene_eval_v!X!_version!Y!_!Z_TAG!"
 
 echo.
 echo ============================================================

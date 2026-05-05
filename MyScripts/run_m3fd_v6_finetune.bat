@@ -51,6 +51,34 @@ REM     -- yacs would re-merge and might confuse readers; the inheritance
 REM     chain is enough.
 REM
 REM ============================================================================
+REM Performance overrides applied (v6-only opt-in via cfg, NOT global)
+REM
+REM   Active in v6 (zero risk to v0-v5 retrain):
+REM     - cfg.TRAINER.PERSISTENT_WORKERS = True (in v6 config)
+REM         data.py reads this and sets DataLoader persistent_workers=True.
+REM         Default in default.py is False, so v0-v5 stay bytes-identical
+REM         on retrain. Saves ~25min on v6 by avoiding worker spin-up
+REM         between 50 epoch (50 epoch x ~30s spin-up at num_workers=6).
+REM     - cfg.TRAINER.N_VAL_PAIRS_TO_PLOT = 1 (in v6 config)
+REM         Default 32; v6 with 50 epoch would write 1750 figs to TB.
+REM         Reduced to 1 sanity figure per epoch. Saves ~25min + TB
+REM         events file -70%.
+REM
+REM   Deliberately NOT applied to v6 (risky for finetune from v5 ckpt):
+REM     - --disable_mp REMOVED (would enable MP=True): kept disabled because
+REM       v6 finetune is more sensitive to fp16 numerical noise than from-scratch
+REM       training; saving 30-60% time not worth NaN / gradient-burst risk on a
+REM       converged model.
+REM     - --limit_val_batches=50: kept at 1.0 because M3FD val shuffle=False
+REM       (data.py:103), so PL would always validate on the SAME first 50
+REM       images -> systematic bias in monitor metric -> wrong best-ckpt
+REM       selection. v6's whole point is ckpt selection accuracy.
+REM
+REM   If v6 finishes successfully and you want to try MP for a v6.1 ablation,
+REM   simply remove --disable_mp and re-run. Compare TB curves: train loss
+REM   should overlap within fp16 noise (~1e-4 per step).
+REM
+REM ============================================================================
 REM Effective TRUE LR trajectory at bs=4 (~945 train batches/epoch)
 REM
 REM   step      0       LR ramps from 0  (WARMUP=50 -> 800 abs step after _scaling)
@@ -84,6 +112,17 @@ REM
 REM   4. PL progress bar Epoch 0: must show "... 945/1155" (sampler override
 REM      inherited from v5 via `from v5_m3fd import cfg`). If "50/260", the
 REM      inheritance broke -- check v6 config does NOT re-import from v4.
+REM
+REM   5. (perf opt sanity) Task Manager / ps should show num_workers=6
+REM      python child processes that PERSIST across epoch boundaries -- new
+REM      spawn at epoch 1+ means PERSISTENT_WORKERS=True did not propagate
+REM      to data.py. Check v6 config has both PERSISTENT_WORKERS=True AND
+REM      that default.py has _CN.TRAINER.PERSISTENT_WORKERS = False declared.
+REM
+REM   6. (perf opt sanity) TB events file size: v5 was 93MB / 10 epoch with
+REM      N_VAL_PAIRS_TO_PLOT=32; v6 should be ~50MB / 50 epoch with
+REM      N_VAL_PAIRS_TO_PLOT=1. If TB exceeds 200MB at epoch 5, the
+REM      N_VAL_PAIRS_TO_PLOT override did not take effect.
 REM
 REM ============================================================================
 REM Expected outcomes

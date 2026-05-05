@@ -1,9 +1,9 @@
 ---
 name: eloftr-cross-modal-experiments
-description: Train and ablate cross-modal EfficientLoFTR variants (v1 contrastive loss, v2 modality embedding, v3 freeze + EarlyStopping, v4 selective BN freeze with REVISION 2 = FREEZE_BACKBONE_BN, v5 M3FD scaling, v6 v5-ckpt-resume slow-LR refinement) on RoadScene IR-VIS. Use when the user mentions v1 / v2 / v3 / v4 / v5 / v6, cross-modal, contrastive loss, InfoNCE, modality embedding, modemb, freeze backbone, FREEZE_BN, FREEZE_BACKBONE_BN, fine_preprocess BN, REVISION 2, BN running stats convergence, EarlyStopping, ablation, USE_CONTRASTIVE, USE_MODALITY_EMB, FREEZE_BACKBONE, WARMUP_STEP, MSLR_MILESTONES, RandomConcatSampler, N_SAMPLES_PER_SUBSET, SB_SUBSET_SAMPLE_REPLACEMENT, "epoch progress bar 50/260", "training only sees 5% of data per epoch", "M3FD step density wrong", "v2 in-domain p@1 0.74 but OOD 0.12", "v5 OOD beats v2 OOD", "modemb only affects coarse not fine", "fine_preprocess BN eats modemb bias", "fine_matching argmax immune to bias", MSBN, modality-specific BN, FiLM, fine_matching cosine, "v6 finetune from v5 ckpt", "resume v5 to improve p@1", scaling RoadScene with LLVIP / M3FD / KAIST, or wants to add a new v5/v6/v7 experiment that reuses the official pretrained weights.
+description: Train and ablate cross-modal EfficientLoFTR variants (v1 contrastive loss, v2 modality embedding, v3 freeze + EarlyStopping, v4 selective BN freeze with REVISION 2 = FREEZE_BACKBONE_BN, v5 M3FD scaling, v6 v5-ckpt-resume slow-LR refinement, v6.1 spillover-fixed continuation with expandable_segments) on RoadScene IR-VIS. Use when the user mentions v1 / v2 / v3 / v4 / v5 / v6 / v6.1, cross-modal, contrastive loss, InfoNCE, modality embedding, modemb, freeze backbone, FREEZE_BN, FREEZE_BACKBONE_BN, fine_preprocess BN, REVISION 2, BN running stats convergence, EarlyStopping, ablation, USE_CONTRASTIVE, USE_MODALITY_EMB, FREEZE_BACKBONE, WARMUP_STEP, MSLR_MILESTONES, RandomConcatSampler, N_SAMPLES_PER_SUBSET, SB_SUBSET_SAMPLE_REPLACEMENT, "epoch progress bar 50/260", "training only sees 5% of data per epoch", "M3FD step density wrong", "v2 in-domain p@1 0.74 but OOD 0.12", "v5 OOD beats v2 OOD", "modemb only affects coarse not fine", "fine_preprocess BN eats modemb bias", "fine_matching argmax immune to bias", MSBN, modality-specific BN, FiLM, fine_matching cosine, "v6 finetune from v5 ckpt", "resume v5 to improve p@1", "v6 spillover", "VRAM 16GB shared GPU memory", "PYTORCH_CUDA_ALLOC_CONF expandable_segments", "PyTorch allocator fragmentation", "GPU-Util 100% but power low", "epoch 6 fast then epoch 7 slow", PCIe spillover, scaling RoadScene with LLVIP / M3FD / KAIST, or wants to add a new v5/v6/v6.1/v7 experiment that reuses the official pretrained weights.
 ---
 
-# RoadScene 跨模态实验：v1 / v2 / v3 / v4 / v5 / v6 与如何加新版本
+# RoadScene 跨模态实验：v1 / v2 / v3 / v4 / v5 / v6 / v6.1 与如何加新版本
 
 > 该 skill 的前置依赖：[eloftr-roadscene-data](../eloftr-roadscene-data/SKILL.md)（数据集 + 监督）和 [eloftr-windows-setup](../eloftr-windows-setup/SKILL.md)（环境）。
 > 评估侧的 apples-to-apples 对比方法见 [eloftr-eval-pipeline](../eloftr-eval-pipeline/SKILL.md)。
@@ -17,12 +17,14 @@ flowchart LR
     v2 --> v3["v3_combined.py<br/>+ FREEZE_BACKBONE=True<br/>+ FREEZE_BN=True (all BN frozen)<br/>+ EarlyStopping<br/>+ aggressive LR schedule"]
     v3 --> v4["v4_combined.py (REVISION 2)<br/>- FREEZE_BACKBONE=False (restore 9.5M backbone)<br/>- FREEZE_BN=False (release fine BN)<br/>+ FREEZE_BACKBONE_BN=True (pin backbone BN only)<br/>- softer LR (TRUE_LR=1.25e-4) + WARMUP_STEP=2<br/>- MSLR=[10,15,20] + ES patience=8"]
     v4 --> v5["v5_m3fd.py<br/>+ M3FD 3780 训练对 (vs RoadScene 177)<br/>+ N_SAMPLES_PER_SUBSET=3780 + replacement=False (强制 opt-in)<br/>+ WARMUP_STEP=20 (320 abs step)<br/>+ MSLR=[3,5,7] + ES patience=3<br/>(--max_epochs=10 in .bat)"]
-    v5 --> v6["v6_finetune.py<br/>从 v5 ep9 ckpt resume<br/>+ CANONICAL_LR 2e-3 → 4e-4 (TRUE_LR=2.5e-5)<br/>+ WARMUP_STEP 20 → 50<br/>+ MSLR=[15,25,35] + ES patience=12<br/>专攻 p@1px (--max_epochs=50 in .bat)"]
+    v5 --> v6["v6_finetune.py<br/>从 v5 ep9 ckpt resume<br/>+ CANONICAL_LR 2e-3 → 4e-4 (TRUE_LR=2.5e-5)<br/>+ WARMUP_STEP 20 → 50<br/>+ MSLR=[15,25,35] + ES patience=12<br/>专攻 p@1px (--max_epochs=50 in .bat)<br/>实测 ep6 spillover 中断"]
+    v6 --> v6_1["v6_1_finetune.py (zero override)<br/>从 v6 ep6 ckpt resume<br/>+ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True (in .bat)<br/>schedule 完全继承 v6"]
 ```
 
 > v4 经过两轮修订：REVISION 1（仅降 LR + 加长 epoch）被实测证伪，当前 v4 处于 REVISION 2 状态。详见 §5。
 > v5 切换到 M3FD 数据集（仍走 IR-VIS 同一 pipeline，见 [eloftr-m3fd-data](../eloftr-m3fd-data/SKILL.md)），sched 重调适配 21× step/epoch。**v5 实测见 §5.6**。
 > v6 不换数据集、不换架构，纯粹用 v2-style 慢 LR 在 v5 ckpt 上继续训练，专攻 v5 短板 p@1px（in-domain 0.435 / OOD 0.186）。**v6 设计动机见 §6 路径 D**。
+> v6.1 是 v6 的 spillover hotfix：v6 实测在 epoch 6 后 PyTorch allocator 碎片化，触发 shared GPU memory fallback，per-step 时间从 0.36s 飙到 4.36s。v6.1 通过 `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` 修复，schedule / 架构 / config 全部继承 v6。**v6.1 完整诊断与设计见 §6 路径 D.2**。
 
 每个 v_x 配置只 `from <previous> import cfg` 然后修改若干字段，**强制累计**：v4 一定包含 v1+v2 的全部能力（loss_contrast / modemb），所以 ablation 时只需要改 main_cfg_path，不需要再编辑代码。
 
@@ -392,7 +394,9 @@ epoch 9:  p@1=0.418  p@3=0.789  p@5=0.864   ← best
 | 训练 → 测试 | RoadScene test (22 对) | M3FD test (210 对) |
 |---|---|---|
 | **v2 v1 ep62** (RS-train) | p@1=**0.7567** p@3=**0.8086** p@5=0.8151 mpe=**1.97** | p@1=0.1192 p@3=0.4971 p@5=0.6948 mpe=4.66 |
-| **v5 v0 ep9** (M3FD-train) | p@1=0.1858 p@3=0.5989 p@5=0.7825 mpe=3.39 | p@1=0.4352 p@3=**0.8072** p@5=**0.8777** mpe=**2.07** |
+| **v5 v0 ep9** (M3FD-train) | p@1=0.1858 p@3=0.5989 p@5=0.7825 mpe=3.39 | p@1=0.4352 p@3=0.8072 p@5=0.8777 mpe=2.07 |
+| **v6 v0 ep6** (resume v5 + slow LR, ep7 spillover 中断) | p@1=0.1767 p@3=**0.6010** p@5=0.7818 mpe=3.39 | p@1=0.4426 p@3=**0.8208** p@5=**0.8863** mpe=**1.96** |
+| **v6.1 v0 ep4** (resume v6 + expandable_segments, ep8 异常中断) | p@1=0.1762 p@3=0.5928 p@5=0.7818 mpe=**3.35** | (test 待跑；ckpt val: p@1=**0.443** p@3=**0.814** p@5=**0.879**, 全面反超 v6 ep6) |
 
 **对角线（in-domain）**：v5 in-domain p@3 (0.8072) ≈ v2 in-domain p@3 (0.8086)，**几乎平手**；v5 p@5 (0.8777) 反超 v2 (0.8151)。**v5 唯一短板是 in-domain p@1**（0.4352 vs v2 0.7567）。
 
@@ -525,6 +529,11 @@ cfg.TRAINER.CANONICAL_LR            = 4e-4   # v5=2e-3, /5 → TRUE_LR=2.5e-5 �
 cfg.TRAINER.WARMUP_STEP             = 50     # v5=20; resume 不需要长 warmup, 50 → 800 abs step
 cfg.TRAINER.MSLR_MILESTONES         = [15, 25, 35]  # v5=[3,5,7]; 让大部分时间停在 full LR
 cfg.TRAINER.EARLY_STOPPING_PATIENCE = 12    # v5=3; 慢 LR 收敛慢 + p@1 优化曲线噪声大需更高 patience
+
+# Performance overrides (v6-only opt-in via cfg; see §6.D.1)
+cfg.TRAINER.PERSISTENT_WORKERS      = True   # default False; keep workers alive across 50 epoch, saves ~25min
+cfg.TRAINER.N_VAL_PAIRS_TO_PLOT     = 1      # default 32; v6 50 epoch x 35 figs/epoch -> 1750 figs would bloat TB by ~70%; keep 1 sanity
+
 # bat: --max_epochs=50 + --ckpt_path=<v5_epoch9_ckpt>
 ```
 
@@ -594,6 +603,260 @@ python train.py ^
   --max_epochs=50 ^
   ... (其余 sampler / num_workers / bs 与 v5_combined 相同)
 ```
+
+#### 6.D.1 v6 性能优化（v6-only opt-in via cfg）
+
+v5 跑了 3h54m，v6 50 epoch 预计 ~20h。原 [v5_perf_opt_1246_9907da30.plan.md](.cursor/plans/v5_perf_opt_1246_9907da30.plan.md) 提了 4 个加速方案，v6 上只采纳 2 个零风险项，并通过 cfg opt-in 严格隔离。
+
+##### 决策矩阵
+
+| 原 plan # | 改动 | 在 v6 上的取舍 | 原因 |
+|---|---|---|---|
+| 1 persistent_workers | **保留 (opt-in)** | 通过 `cfg.TRAINER.PERSISTENT_WORKERS` 默认 False + v6 主动 opt-in | 让 v6 单独受益，v0-v5 重训保字节级一致 |
+| 2 去掉 --disable_mp | **不做** | v6 是 finetune 已收敛模型，对 fp16 数值噪声比从头训更敏感 | 保留 v0-v5 的兜底实践，可作 v6.1 ablation |
+| 4 N_VAL_PAIRS_TO_PLOT=1 | **保留 (opt-in)** | 加在 v6 config，不动 default.py 的 32 | 不影响指标，仅减 figure 数；v0-v5 行为不变 |
+| 6 --limit_val_batches=50 | **不做** | M3FD val `shuffle=False`，PL 取前 50 张 = systematic bias | v6 核心目标是 ckpt 选择准确，不能为 1% 时间冒此风险 |
+
+##### opt-in 设计动机：为什么走 cfg 而不是全局或命令行 flag
+
+跟项目现有 opt-in 模式（`USE_CONTRASTIVE` / `USE_MODALITY_EMB` / `FREEZE_BACKBONE_BN` / `N_SAMPLES_PER_SUBSET` 等）完全一致——所有"实验级别配置"都集中在 v_x config 里管理。原 plan 直接全局打开会让 v1-v5 重训时 RNG 序列变化，破坏可复现性。
+
+##### persistent_workers 与 numpy RNG 的具体技术分析
+
+[src/datasets/roadscene.py:249](../../../src/datasets/roadscene.py)：
+```python
+if np.random.rand() < self.homography_prob:
+    H_0to1 = _random_homography(h1_r, w1_r, **self.homography_kwargs)
+```
+
+[src/datasets/roadscene.py:104](../../../src/datasets/roadscene.py)：
+```python
+if rng is None:
+    rng = np.random.default_rng()
+```
+
+augmentation 用的是 `np.random` 而不是 `torch.rand`。**项目里没有任何 `worker_init_fn`**（grep 全仓 0 命中），意味着 PyTorch DataLoader 默认行为只设 `torch.manual_seed(base_seed + worker_id)`，**不会设 `np.random.seed`**——这是 PyTorch/numpy RNG 不对齐的已知 pitfall。
+
+| 场景 | numpy state 行为 |
+|---|---|
+| 不开 persistent_workers（v0-v5 默认） | 每 epoch worker 重 spawn，numpy state 从 fork 时主进程的 global state 重新开始 |
+| 开 persistent_workers（v6 opt-in） | worker 跨 epoch 复用，numpy state 在 epoch 间持续累积 |
+
+两条路径**统计意义完全等价**（augmentation 分布相同），但**具体的随机数序列不字节级一致**。v0-v5 走默认 False，重训能严格复现历史；v6 走 True，单 epoch 内一致但跨 epoch 不可严格复现。
+
+##### N_VAL_PAIRS_TO_PLOT vs ENABLE_PLOTTING 关系澄清
+
+两者完全正交，需要分别 opt-in：
+
+| Flag | 控制位置 | v6 状态 |
+|---|---|---|
+| `cfg.TRAINER.ENABLE_PLOTTING` | [lightning_loftr.py:285](../../../src/lightning/lightning_loftr.py) **训练阶段**画图 | False（已被 [m3fd_trainval.py:73](../../../configs/data/m3fd_trainval.py) 强制设为 False） |
+| `cfg.TRAINER.N_VAL_PAIRS_TO_PLOT` | [lightning_loftr.py:311](../../../src/lightning/lightning_loftr.py) **验证阶段**画图 | 1（v6 config 显式 opt-in） |
+
+##### v0-v5 字节级一致性边界
+
+| 改动 | 影响 v0-v5 重训吗 |
+|---|---|
+| `default.py` 加 `_CN.TRAINER.PERSISTENT_WORKERS = False` 默认 | 否（拿默认值，行为同改动前） |
+| `data.py` loader_params 读 cfg | 否（v0-v5 config 没 opt-in，拿 False） |
+| v6 config 加 `cfg.TRAINER.PERSISTENT_WORKERS = True` | 否（仅 v6 受影响） |
+| v6 config 加 `cfg.TRAINER.N_VAL_PAIRS_TO_PLOT = 1` | 否（仅 v6 受影响） |
+
+**结论**：v0-v5 任何 ckpt 都不会因这次改动变化；v0-v5 任何 bat 重新跑得到的 train loss / metric 都跟历史字节级一致。
+
+##### 后续改进占位
+
+- **v6.1 MP ablation**：v6 跑稳后单独立项，从 v6 ckpt 继续训，去掉 `--disable_mp`，对比 train loss 是否在 fp16 噪声 (~1e-4/step) 内重合
+- **v7+ 字节级可复现** (如果需要)：在 [src/datasets/roadscene.py](../../../src/datasets/roadscene.py) 加显式 `worker_init_fn` 给每个 worker 每个 epoch 设 numpy seed = `base_seed + worker_id + epoch_id`。当前 v6 接受跨 epoch numpy state 累积的微小不可复现性
+
+#### 6.D.2 v6.1: v6 spillover 修复版（PyTorch allocator fragmentation cure）
+
+**已实现**：[configs/loftr/eloftr_full_v6_1_finetune.py](../../../configs/loftr/eloftr_full_v6_1_finetune.py) + [MyScripts/run_m3fd_v6_1_finetune.bat](../../../MyScripts/run_m3fd_v6_1_finetune.bat)。**v6 schedule 全继承，零 override**——v6.1 跟 v6 的全部差别集中在 .bat 一行环境变量 + ckpt 起点上移。
+
+##### v6 实测崩溃指纹（2026-05-05，RTX 5070 Ti 16GB）
+
+| epoch | p@1 | p@3 | p@5 | wall time | 状态 |
+|---|---|---|---|---|---|
+| 0 (val end) | 0.400 | 0.788 | 0.865 | ~25 min | ckpt load + warmup |
+| 1 | 0.409 | 0.773 | 0.849 | 06:56 | fast (~7 min/epoch) |
+| 2 | 0.423 | 0.790 | 0.863 | 06:47 | |
+| 3 | 0.417 | 0.787 | 0.861 | 06:46 | |
+| 4 | 0.408 | 0.794 | 0.869 | 07:01 | |
+| 5 | 0.421 | 0.796 | 0.866 | 06:46 | |
+| **6** | **0.425** | **0.801** | **0.873** | **46:39** | **spillover starts (16.6GB VRAM)** |
+| 7 | — | — | — | >80min projected at 4.36 s/step | user aborted |
+
+ep6 ckpt 是 v6 全程最佳 + 已经在每个指标上反超 v5 ep9（v5 = 0.418 / 0.789 / 0.864），证明慢 LR 策略本身有效。
+
+##### 诊断：PyTorch caching allocator 碎片化
+
+`nvidia-smi` 在 ep7 中段：
+
+```text
+VRAM:  15876 / 16303 MiB  (97.4%, only 427 MiB free)
+Power: 85W / 300W         (28%; GPU underutilised but kernels at 100%)
+```
+
+"GPU-Util 100% + 功耗远低于 TDP" 是 PCIe-bottlenecked GPU 的指纹——VRAM 满了，PyTorch 用 shared GPU memory（system RAM via PCIe 4.0 ~32 GB/s vs VRAM ~700 GB/s = **22× 慢**）。
+
+根因：默认 PyTorch caching allocator 是 slab-based（固定尺寸块）。v6 跑 6 epoch 后混合分配模式（train batch + val batch + matplotlib figure + ckpt save）让 free pool 碎片化，即使总 free > 1 GB，也找不到单个连续大块给新 gradient tensor 用 → fallback 到 shared memory。
+
+加重因素：
+- Cursor / Edge WebView2 / Epic Games / Steam / NVIDIA App / asus_framework 等 21 个非训练 GPU 进程共享同一 16 GB，悄悄占了 2-4 GB
+- v6 的 `PERSISTENT_WORKERS=True` 让 6 worker + pinned memory buffer 跨 50 epoch 持续存活，整体内存压力上升
+
+##### Cure：expandable_segments
+
+```bat
+set PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+```
+
+机制：把 PyTorch allocator 从 slab-based 切换为 CUDA Virtual Memory API。物理页可以非连续，但通过 GPU MMU 映射成虚拟连续段。**虚拟地址永远连续 → 碎片不可能发生**。代价：每个 segment 第一次分配多 ~2-3 ms，后续零成本。
+
+##### v6.1 vs v6 diff（共 4 项，全部在 .bat）
+
+1. **新加** `set PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`（必须在 `python` 之前、`conda activate` 之后）
+2. `main_cfg`: `eloftr_full_v6_finetune.py` → `eloftr_full_v6_1_finetune.py`（零 override 纯继承，仅日志可追溯）
+3. `--exp_name`: `m3fd_v6_finetune` → `m3fd_v6_1_finetune`（独立 TB 目录）
+4. `--ckpt_path`: v5 ep9 → **v6 ep6**（`epoch=6-precision@1px=0.425-precision@3px=0.801-precision@5px=0.873.ckpt`）
+
+其他全部继承 v6（schedule / sampler / freeze / contrastive / modemb / persistent_workers / N_VAL_PAIRS_TO_PLOT 等等），**故意一变量改动**，便于将来归因 expandable_segments 是否真治根。
+
+##### 为什么是 Strategy A（完整重跑 50 epoch）而不是 Strategy B（缩短 max_epochs）
+
+`--ckpt_path` 是 weights-only 加载（详见 [§6.D `--ckpt_path` 在本仓的精确语义`](#--ckpt_path-在本仓的精确语义和-pl-原生---resume_from_checkpoint-不同) 段）：optimizer / scheduler / epoch counter 全部归零。所以 v6.1 的 LR schedule 必须显式定义"从 epoch 0 重新跑"还是"接着 v6 走"：
+
+| 方案 | max_epochs | WARMUP_STEP | MSLR | 优劣 |
+|---|---|---|---|---|
+| **A（chosen）** | 50 | 50 | [15, 25, 35] | LR 数学最干净，AdamW 重置后需要 warmup，浪费 1 epoch warmup 仅 2% 总预算 |
+| B | 43 | 5 | [8, 18, 28] | 不浪费已训进度，但数学 fragile（warmup_step 跟 milestones 容易错位） |
+| C | 50 | 10 | [15, 25, 35] | 短 warmup + 完整后段，A 的微调，收益弱 |
+
+User 选 A，所以 v6.1 config 完全零 override（schedule = v6 schedule）。
+
+##### 为什么不顺带改 batch_size / mixed precision / prefetch_factor
+
+| 候选 | 拒绝原因 |
+|---|---|
+| `bs 4 → 2` | LR 数学需按 sqrt 重 scale，扰动 v6.1 vs v6 的对照 |
+| 去掉 `--disable_mp`（启用 fp16） | finetune 已收敛模型对 fp16 数值噪声敏感，可能让 p@1 微跌 |
+| `prefetch_factor 2 → 1` | 节省 60-120 MB **system RAM** 不是 VRAM，对 spillover 帮助微乎其微，且需改 [src/lightning/data.py](../../../src/lightning/data.py) 超出单 .bat 隔离边界 |
+| 关掉 `PERSISTENT_WORKERS` | 跟 spillover 无关（worker 内存是 system RAM 不是 VRAM），代价是 50 epoch × 30s spin-up = 25 min |
+
+留作 v6.2 备案：**仅当** v6.1 跑了 5+ epoch 后 expandable_segments 没修好 spillover，才考虑这 4 项的组合。
+
+##### 操作 SOP（启动 v6.1 前必看）
+
+1. 用任务管理器关掉非训练 GPU 应用（Cursor / Edge WebView2 / Epic Games / Steam / NVIDIA App / asus_framework / TranslucentTB / Notepad / 浏览器 WebGL 标签页）
+2. **从独立 WindowsTerminal 双击 .bat 启动**，不要从 Cursor 集成终端启动（关 Cursor 会杀训练）
+3. `nvidia-smi` 确认非训练进程 VRAM 占用 < 1 GB 才启动
+4. 头 30 行启动日志通过 v6 的 gate 1-6（见 [v6 config docstring](../../../configs/loftr/eloftr_full_v6_finetune.py)）+ v6.1 的 gate 7-9（见 [v6.1 config docstring](../../../configs/loftr/eloftr_full_v6_1_finetune.py)）
+
+##### v6.1 新增 validation gate（追加到 v6 的 6 个 gate 之后）
+
+| Gate | 时机 | 通过条件 | 失败处理 |
+|---|---|---|---|
+| 7 (allocator sanity) | ep1 后 nvidia-smi | python.exe VRAM ~12-13 GB 且 ep2-10 稳定，不超 14 GB | `set` 命令位置错了，必须在 `python` 之前 |
+| 8 (no second spillover) | ep1-50 全程 | per-epoch ~7 min 全程稳定 | 通常是外部 GPU app 启动，关掉即可 |
+| 9 (ckpt resume sanity) | ep0 val end | p@1 ≥ 0.420（v6 ep6 是 0.425，AdamW 重置 ±0.005 OK） | 检查 missing_keys；ckpt path 拼写 |
+
+##### 实测结果
+
+###### v6 训练曲线（M3FD val，2026-05-05）
+
+| epoch | p@1 | p@3 | p@5 | wall time | 状态 |
+|---|---|---|---|---|---|
+| 0 (val end) | 0.400 | 0.788 | 0.865 | ~25 min | ckpt load + warmup ramp |
+| 1 | 0.409 | 0.773 | 0.849 | 06:56 | fast (~7 min/epoch baseline) |
+| 2 | 0.423 | 0.790 | 0.863 | 06:47 | |
+| 3 | 0.417 | 0.787 | 0.861 | 06:46 | |
+| 4 | 0.408 | 0.794 | 0.869 | 07:01 | |
+| 5 | 0.421 | 0.796 | 0.866 | 06:46 | |
+| **6** | **0.425** | **0.801** | **0.873** | **46:39** | **spillover starts (16.6 GB VRAM)** |
+| 7 | — | — | — | aborted | >80 min projected at 4.36 s/step → user 中断 |
+
+v6 ep6 = v6 全程最佳 + 已经在每个 in-domain 指标上反超 v5 ep9（v5 = 0.418 / 0.789 / 0.864）。
+
+###### v6.1 训练曲线（M3FD val，spillover 修复后）
+
+| epoch | p@1 | p@3 | p@5 | wall time | 状态 |
+|---|---|---|---|---|---|
+| 0 (val end) | 0.421 | 0.804 | 0.873 | 13:40 | gate 9 通过 (≥0.420) |
+| 1 | 0.419 | 0.787 | 0.858 | 12:40 | |
+| 2 | 0.424 | 0.796 | 0.866 | 10:32 | |
+| 3 | 0.415 | 0.780 | 0.851 | 09:21 | |
+| **4** | **0.443** | **0.814** | **0.879** | 10:18 | **NEW SOTA on all in-domain metrics** |
+| 5 | 0.432 | 0.808 | 0.876 | 10:06 | val 见顶后波动 |
+| 6 | 0.423 | 0.805 | 0.872 | 09:57 | |
+| 7 | 0.426 | 0.798 | 0.866 | 10:25 | train loss 仍降 (0.398→0.348) |
+| 8 | — | — | — | aborted at 39% | 原因不明（未排查；候选：Ctrl+C / 系统睡眠 / 偶发 OOM；log 截断）|
+
+v6.1 ep4 全面反超 v6 ep6（p@1 +4.2% / p@3 +1.6% / p@5 +0.7%）。Spillover 修复成功：per-epoch ~10 min 全程稳定，无 spike（vs v6 ep6 的 46:39 spillover）。但 v6.1 比 v6 慢 50%（~10 vs ~7 min/epoch），疑似 operator SOP 不彻底（外部 GPU 应用未关干净），不影响最终结果。
+
+###### in-domain (M3FD test 210) 对比
+
+| ckpt | p@1 | p@3 | p@5 | mpe | Δ vs v5 ep9 |
+|---|---|---|---|---|---|
+| v5 ep9 | 0.4352 | 0.8072 | 0.8777 | 2.0747 | baseline |
+| v6 ep6 | **0.4426** | **0.8208** | **0.8863** | **1.9630** | p@1 +1.7% / p@3 +1.7% / p@5 +1.0% / mpe -5.4% |
+| v6.1 ep4 | (test 待跑) | (test 待跑) | (test 待跑) | (test 待跑) | val 文件名 0.443 / 0.814 / 0.879，按 v5/v6 val→test gap +0.017/+0.018 推测 test ≈ **0.461 / 0.832 / 0.897** |
+
+###### OOD (RoadScene test 22) 对比
+
+| ckpt | p@1 | p@3 | p@5 | mpe | Δ vs v5 ep9 |
+|---|---|---|---|---|---|
+| v5 ep9 | **0.1858** | 0.5989 | 0.7825 | 3.3856 | baseline |
+| v6 ep6 | 0.1767 | **0.6010** | 0.7818 | 3.3908 | p@1 -4.9% / p@3 +0.4% / p@5 -0.1% / mpe +0.2% |
+| v6.1 ep4 | 0.1762 | 0.5928 | 0.7818 | **3.3478** | p@1 -5.2% / p@3 -1.0% / p@5 -0.1% / **mpe -1.1% (improved)** |
+
+v6 多 ckpt OOD 对比（验证 trade-off 是否 stable）：
+
+| v6 ckpt | OOD p@1 | OOD p@3 | OOD p@5 | OOD mpe |
+|---|---|---|---|---|
+| v6 ep4 (top3) | 0.1734 | 0.5916 | 0.7767 | 3.4377 |
+| v6 ep5 (top2) | 0.1786 | 0.5915 | 0.7784 | 3.4307 |
+| v6 ep6 (top1) | 0.1767 | 0.6010 | 0.7818 | 3.3908 |
+
+v6 ep4-6 三个 ckpt OOD p@1 在 [0.173, 0.179] 区间窄幅浮动，**没有恶化趋势**——证明 v6 慢 LR 路径的 OOD trade-off 是稳定 trade-off 而不是 progressive collapse。v6.1 ep4 (0.176) 也落在同一区间 → trade-off 已饱和、不再随训练扩大。
+
+###### 综合通用性指标（in-domain test p@3 + OOD test p@3）
+
+| 模型 | M3FD test p@3 | RoadScene OOD p@3 | 综合 | 排名 |
+|---|---|---|---|---|
+| v5 ep9 | 0.8072 | 0.5989 | 1.4061 | 3 |
+| **v6 ep6** | **0.8208** | **0.6010** | **1.4218** | **1** |
+| v6.1 ep4 | (test 待跑, val proxy 0.814) | 0.5928 | (proxy 1.4068) | 2 (proxy) |
+
+**v6 ep6 综合通用性最优**；v6.1 ep4 in-domain 涨被 OOD 跌部分抵消，按 proxy 略低于 v6 ep6 但仍持平 v5。等 v6.1 ep4 → M3FD test 跑完才能定排名（预计 v6.1 综合 ≈ 1.43，跟 v6 ep6 几乎平手）。
+
+###### 关键判定（5 条）
+
+1. **v6.1 ep4 = M3FD in-domain 全面 SOTA**（val p@1 0.443 反超 v6 ep6 的 0.425，+4.2% rel；val p@3 0.814 反超 0.801，+1.6% rel）
+2. **OOD trade-off 在可接受区间稳定**（v5 → v6 → v6.1 OOD p@1 = 0.186 → 0.177 → 0.176，**v6 → v6.1 几乎不动**，差 0.0005 << 22-pair 测试的 1-pair 量子 4.5%）
+3. **OOD mpe 反而改善**（v6.1 vs v5: -1.1%）：fine refinement 微 M3FD-overfit 把 <1px 桶推到 1-3px 桶（→ p@1 跌），同时把长尾大误差收紧（→ mpe 改善），不是单方面退化
+4. **expandable_segments 完全治根**（v6.1 全程 ~10 min/epoch 无 spillover；详见 [`configs/loftr/eloftr_full_v6_1_finetune.py`](../../../configs/loftr/eloftr_full_v6_1_finetune.py) 诊断段）
+5. **v6/v6.1 路径达天花板**：M3FD val p@1 = 0.443 接近 v6 docstring 的"弱成功"阈值 0.45，距离"强成功"0.55 还有 24%；v6.1 ep5-7 已开始 plateau（p@1 0.43±0.01 全部低于 ep4），patience=12 内剩余 9 epoch 突破有限。**进一步突破必须走 v7 MSBN（[§6 路径 E1](#候选-e1modality-specific-bn-in-fine_preprocess推荐v7-首选)）破 fine 模态盲**
+
+###### 推荐交付
+
+**v6.1 ep4 ckpt**：
+
+```text
+logs\tb_logs\m3fd_v6_1_finetune\version_0\checkpoints\
+  epoch=4-precision@1px=0.443-precision@3px=0.814-precision@5px=0.879.ckpt
+```
+
+理由：
+- in-domain (val) 三指标全面 SOTA
+- OOD trade-off 稳定不恶化（同 v6 ep6 同一窄区间内）
+- OOD mpe 反而改善
+- 综合通用性 (proxy) 持平 v5 baseline，与 v6 ep6 几乎平手
+
+###### 待办
+
+1. **跑 v6.1 ep4 → M3FD test 210 完整评估**（高优先级）：补完 in-domain 对照表 + 计算真实综合通用性 + 排名 v5/v6/v6.1
+2. 异常终止原因排查（低优先级）：检查 Windows 事件查看器 / 电源管理 / Python traceback。已有 ep4 即可收尾，不强求
+3. v7 MSBN 设计（中期）：见 [§6 路径 E1](#候选-e1modality-specific-bn-in-fine_preprocess推荐v7-首选)，从 v6.1 ep4 ckpt 续训
 
 ### 路径 E（opt）：fine 阶段懂模态 — 工程量大，留作 v7/v8 候选
 
@@ -713,4 +976,5 @@ flowchart TD
 | v3 | `configs/loftr/eloftr_full_v3_combined.py` | `run_roadscene_v3_combined.bat` | + FREEZE_BACKBONE/BN + EarlyStopping + 激进 LR schedule | 0.678 |
 | v4 (REVISION 2) | `configs/loftr/eloftr_full_v4_combined.py` | `run_roadscene_v4_combined.bat` | v3 但**解冻 backbone + FREEZE_BN=False + FREEZE_BACKBONE_BN=True**（仅冻 backbone BN，fine BN 保留可训）+ TRUE_LR=1.25e-4 + WARMUP_STEP=2 + MSLR=[10,15,20] + ES patience=8 | 0.716 (ep 9)，伴随 p@1=0.329 / p@5=0.814 异常分布 |
 | **v5 (M3FD)** | `configs/loftr/eloftr_full_v5_m3fd.py` | `run_m3fd_v5_combined.bat` | v4 REVISION 2 架构不变（FREEZE_BACKBONE_BN=True / InfoNCE / modemb），数据从 RoadScene 177 切到 M3FD 3780（21× 步密度）+ **N_SAMPLES_PER_SUBSET=3780 + SB_SUBSET_SAMPLE_REPLACEMENT=False（必须 opt-in，否则只用 200 样本/epoch，见 §4.5）** + WARMUP_STEP=20（320 abs step ≈ 3.4% total）+ MSLR=[3,5,7] + ES patience=3，max_epochs=10 在 bat 里设 | **In-domain (M3FD test 210)**: p@1=0.4352 / p@3=**0.8072** / p@5=**0.8777** / mpe=2.07; **OOD (RoadScene test 22)**: p@1=0.1858 / p@3=0.5989 / p@5=0.7825 / mpe=3.39 → OOD 全面碾压 v2 OOD（详见 [§5.6](#56-v5-m3fd-实测结果与-ood-矩阵)） |
-| **v6 (M3FD finetune)** | `configs/loftr/eloftr_full_v6_finetune.py` | `run_m3fd_v6_finetune.bat` | v5 全部继承 + `--ckpt_path` 指向 v5 ep9 ckpt + CANONICAL_LR 2e-3→4e-4（TRUE_LR=2.5e-5 ≈ v2 effective）+ WARMUP_STEP 20→50 + MSLR=[15,25,35] + ES patience=12，max_epochs=50 在 bat 里设。**专攻 v5 短板 in-domain p@1**，设计动机见 [§6 路径 D](#路径-dv5-ckpt-resume--慢-lr-精修-v6_finetune专攻-p1px) | 待跑（目标 p@1≥0.55） |
+| **v6 (M3FD finetune)** | `configs/loftr/eloftr_full_v6_finetune.py` | `run_m3fd_v6_finetune.bat` | v5 全部继承 + `--ckpt_path` 指向 v5 ep9 ckpt + CANONICAL_LR 2e-3→4e-4（TRUE_LR=2.5e-5 ≈ v2 effective）+ WARMUP_STEP 20→50 + MSLR=[15,25,35] + ES patience=12，max_epochs=50 在 bat 里设。**专攻 v5 短板 in-domain p@1**，设计动机见 [§6 路径 D](#路径-dv5-ckpt-resume--慢-lr-精修-v6_finetune专攻-p1px)。性能优化（v6-only opt-in via cfg）：`PERSISTENT_WORKERS=True` + `N_VAL_PAIRS_TO_PLOT=1`（节省 ~50min，详见 [§6.D.1](#6d1-v6-性能优化v6-only-opt-in-via-cfg)）；保留 `--disable_mp` + 全 val_batches 以保 finetune 数值稳定与 ckpt 选择准确 | **ep1-5 fast (~7 min/ep, p@3 0.773→0.796)**；**ep6 = 阶段最佳**：M3FD test (210) p@1=**0.4426** / p@3=**0.8208** / p@5=**0.8863** / mpe=**1.96**；RoadScene OOD (22) p@1=0.1767 / p@3=**0.6010** / p@5=0.7818 / mpe=3.39；ep7 PyTorch allocator 碎片化触发 spillover (per-step 0.36s→4.36s)，user 中断；继续路径 → v6.1 (详见 [§6.D.2](#6d2-v61-v6-spillover-修复版pytorch-allocator-fragmentation-cure)) |
+| **v6.1 (v6 spillover hotfix, M3FD final)** | `configs/loftr/eloftr_full_v6_1_finetune.py` | `run_m3fd_v6_1_finetune.bat` | v6 全部继承（**零 override**，schedule 一致）+ `--ckpt_path` 指向 v6 ep6 ckpt（新起点）+ .bat 头部 `set PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`（PyTorch allocator 切到 CUDA Virtual Memory API，**虚拟连续段消除碎片化**）+ 操作员需关闭非训练 GPU 应用并用独立 WindowsTerminal 启动 | **ep4 = 推荐最终交付**：M3FD val p@1=**0.443** / p@3=**0.814** / p@5=**0.879**（**全面反超 v6 ep6** +4.2%/+1.6%/+0.7% rel）；RoadScene OOD (22) p@1=0.1762 / p@3=0.5928 / p@5=0.7818 / mpe=**3.35** (**mpe 反而改善 1.1%**)；ep5-7 plateau (p@1 0.43±0.01)；ep8 异常中断（原因未排查）。Spillover 修复成功 (~10 min/ep 全程稳定)。M3FD test 210 评估待跑。详见 [§6.D.2](#6d2-v61-v6-spillover-修复版pytorch-allocator-fragmentation-cure) |

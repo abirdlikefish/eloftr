@@ -1,11 +1,17 @@
 ---
 name: eloftr-eval-pipeline
-description: Evaluate EfficientLoFTR checkpoints (official or finetuned v1/v2/v3) on RoadScene IR-VIS in a way that exactly matches training-time validation. Use when the user mentions eval_roadscene, independent eval, "training val higher than independent eval", precision@3px discrepancy, reparameter, overall.txt / summary.csv, official vs finetuned ckpt evaluation, or wants to fairly compare baseline vs finetuned numbers.
+description: Evaluate EfficientLoFTR checkpoints (official or finetuned v1..v6, including sub-versions like v6_1) on RoadScene IR-VIS or M3FD test splits in a way that exactly matches training-time validation. Use when the user mentions eval_roadscene, eval_m3fd, eval_roadscene_finetuned, eval_m3fd_finetuned, independent eval, "training val higher than independent eval", precision@3px discrepancy, reparameter, overall.txt / summary.csv, official vs finetuned ckpt evaluation, X/Y/Z bat arguments (version / Lightning version / ckpt rank), sub-version v6_1 / v6.1, sub-version skip filter, dump\\<dataset>_eval_v<X>_version<Y>_<topZ|last> naming, or wants to fairly compare baseline vs finetuned numbers across datasets.
 ---
 
-# RoadScene Evaluation Pipeline（与训练 val 对齐）
+# Evaluation Pipeline（与训练 val 对齐，支持 RoadScene + M3FD）
 
 > 该 skill 假定数据集已经按 [eloftr-roadscene-data](../eloftr-roadscene-data/SKILL.md) 集成、模型按 [eloftr-cross-modal-experiments](../eloftr-cross-modal-experiments/SKILL.md) 训练完成。
+>
+> 同一份 [MyScripts/eval_roadscene.py](../../../MyScripts/eval_roadscene.py) 既能跑 RoadScene test，也能跑 M3FD test（只是名字保留了历史叫法）。两个 bat wrapper 区分评估集：
+> - [MyScripts/eval_roadscene_finetuned.bat](../../../MyScripts/eval_roadscene_finetuned.bat) → 评估 RoadScene test
+> - [MyScripts/eval_m3fd_finetuned.bat](../../../MyScripts/eval_m3fd_finetuned.bat) → 评估 M3FD test
+>
+> 两个 wrapper CLI 完全对称，因此 v1..v4（roadscene 训练）和 v5+（M3FD 训练）都可以做 in-domain 与 OOD 双向比较。
 
 ## 0. 为什么必须有专门的 eval skill
 
@@ -66,25 +72,95 @@ python MyScripts\eval_roadscene.py ^
 
 ## 4. Bat 脚本
 
-| 脚本 | 用途 | 必改字段 |
-|------|------|---------|
-| [MyScripts/eval_roadscene_official.bat](../../../MyScripts/eval_roadscene_official.bat) | 跑官方 `weights/eloftr_outdoor.ckpt` | 默认开箱即用；想换 split 改 `--list_path` |
-| [MyScripts/eval_roadscene_finetuned.bat](../../../MyScripts/eval_roadscene_finetuned.bat) | 跑 v1/v2/v3 finetuned ckpt | `FT_CKPT` + **`FT_CFG`**（必须与训练 main_cfg 一致） |
+| 脚本 | 评估集 | CLI |
+|------|-------|-----|
+| [MyScripts/eval_roadscene_official.bat](../../../MyScripts/eval_roadscene_official.bat) | RoadScene test | 无参数，跑 `weights/eloftr_outdoor.ckpt` |
+| [MyScripts/eval_roadscene_finetuned.bat](../../../MyScripts/eval_roadscene_finetuned.bat) | RoadScene test | `X [Y] [Z]` |
+| [MyScripts/eval_m3fd_finetuned.bat](../../../MyScripts/eval_m3fd_finetuned.bat) | M3FD test | `X [Y] [Z]` |
 
-`eval_roadscene_finetuned.bat` 顶部的对照表必须遵守，否则会发生 “v3 ckpt 用 baseline cfg 加载 → modemb 参数被识别为 unexpected_keys 而丢弃 → 评估的等价于半个 baseline 模型”：
+### 4.1 X / Y / Z 三参数（两个 finetuned wrapper 共用）
 
-| ckpt | 必须传的 main_cfg |
-|------|-------------------|
-| baseline (v0) | `configs/loftr/eloftr_full.py` |
-| v1 contrast   | `configs/loftr/eloftr_full_v1_contrast.py` |
-| v2 modemb     | `configs/loftr/eloftr_full_v2_modemb.py` |
-| v3 combined   | `configs/loftr/eloftr_full_v3_combined.py` |
+| arg | 含义 | 默认 / 哨兵 |
+|-----|------|-------------|
+| `X` | 版本号，支持普通整数 `1..6` 与 sub-version `6_1` 或 `6.1`（脚本内部统一归一化为 `6_1`） | 必填，无默认；`-1` 视为缺省并报错 |
+| `Y` | Lightning `version_Y` 子目录编号 | 缺省 = 当前 EXP 下数值最大的 `version_N`（编号可不连续）；传 `-1` 也走默认 |
+| `Z` | ckpt 选择规则 | 缺省 = `1`；`1..5` = 按文件名里 `precision@3px=` 倒序的第 N 个；`6` = `last.ckpt` |
 
-加载完会打印 `missing_keys / unexpected_keys`，理想状态：
+`-1` 哨兵在三个位置都生效，方便"默认 Y + 自定义 Z"这种需求（必须 `X -1 Z`，因为是位置参数）。
+
+无参数双击 / 直接运行时会交互提示 `Enter X [Y] [Z]`，空格或逗号分隔，未输入的位保留默认。
+
+### 4.2 EXP 与 cfg 自动解析（含 sub-version skip filter）
+
+```
+EXP : logs\tb_logs\*_v<X>_*           # 任意 dataset 前缀；自动跳 _debug / _small
+                                      # sub-version skip：tail 首字符是数字则丢弃
+                                      # 例：X=6 命中 m3fd_v6_finetune，跳过 m3fd_v6_1_finetune
+                                      #     X=6_1 命中 m3fd_v6_1_finetune
+cfg : configs\loftr\eloftr_full_v<X>_*.py   # 同样的 sub-version skip filter
+ckpt: <EXP>\version_<Y>\checkpoints\
+        - Z=1..5: epoch=*precision@3px=*.ckpt 倒序第 Z 个
+        - Z=6   : last.ckpt
+```
+
+完整 OUT_DIR 命名见第 4.4 节。
+
+### 4.3 ckpt ↔ cfg 自动配对（保留对照表只为人脑核对）
+
+由于脚本现在自动按 `eloftr_full_v<X>_*.py` glob，**用户一般不需要手填 cfg 名**。下面的对照表只用来在 `missing_keys / unexpected_keys` 异常时反查脚本是否选对了 cfg：
+
+| X | EXP 目录 | 自动选中的 cfg |
+|---|---------|----------------|
+| `1` | `roadscene_v1_contrast` | `eloftr_full_v1_contrast.py` |
+| `2` | `roadscene_v2_modemb` | `eloftr_full_v2_modemb.py` |
+| `3` | `roadscene_v3_combined` | `eloftr_full_v3_combined.py` |
+| `4` | `roadscene_v4_combined` | `eloftr_full_v4_combined.py` |
+| `5` | `m3fd_v5_combined` | `eloftr_full_v5_m3fd.py` |
+| `6` | `m3fd_v6_finetune` | `eloftr_full_v6_finetune.py` |
+| `6_1` (= `6.1`) | `m3fd_v6_1_finetune` | `eloftr_full_v6_1_finetune.py` |
+| baseline (官方) | — | `eloftr_full.py`（仅 `eval_roadscene_official.bat` 走这条） |
+
+加载完仍会打印 `missing_keys / unexpected_keys`，理想状态：
 - 官方 ckpt + baseline cfg：两者都为空。
-- 官方 ckpt + v2/v3 cfg：`missing_keys = ['modality_emb_ir', 'modality_emb_vis']`（modemb 用初值），`unexpected_keys = []`。
-- finetuned v_x ckpt + 对应 v_x cfg：两者都为空。
-出现额外 key 时立刻停下来核对 cfg 与 ckpt 的对应关系。
+- 官方 ckpt + v2/v3/... cfg：`missing_keys = ['modality_emb_ir', 'modality_emb_vis']`（modemb 用初值），`unexpected_keys = []`。
+- finetuned v_x ckpt + 自动选中的 v_x cfg：两者都为空。
+
+如果出现额外 key，先看 echo header 里的 `Cfg` / `Ckpt` 行确认 sub-version skip filter 没把对的 cfg 误丢。
+
+### 4.4 OUT_DIR 命名规则（统一）
+
+```
+RoadScene eval : dump\roadscene_eval_v<X>_version<Y>_<topZ|last>
+M3FD eval      : dump\m3fd_eval_v<X>_version<Y>_<topZ|last>
+```
+
+`<X>` 是归一化后的下划线形式（`6_1`），`<topZ|last>` 由 Z 决定：`Z=1..5 → top1..top5`，`Z=6 → last`。
+
+样例：
+
+| 命令 | OUT_DIR |
+|------|---------|
+| `eval_roadscene_finetuned.bat 3` | `dump\roadscene_eval_v3_version3_top1` |
+| `eval_roadscene_finetuned.bat 5` (cross-dataset, v5 是 M3FD-trained) | `dump\roadscene_eval_v5_version0_top1` |
+| `eval_m3fd_finetuned.bat 5` (in-domain) | `dump\m3fd_eval_v5_version0_top1` |
+| `eval_m3fd_finetuned.bat 4` (cross-dataset, v4 是 RoadScene-trained) | `dump\m3fd_eval_v4_version0_top1` |
+| `eval_m3fd_finetuned.bat 6_1` | `dump\m3fd_eval_v6_1_version0_top1` |
+| `eval_m3fd_finetuned.bat 6.1 -1 6` | `dump\m3fd_eval_v6_1_version0_last` |
+
+> 代价：从 dump 目录名看不出"训练 dataset"，但通过 X 与 v1..v4=roadscene / v5+=m3fd 的约定可推；想严格确认时打开目录里的 `overall.txt`，最上面会写 ckpt 路径。
+
+### 4.5 历史目录兼容
+
+旧命名（已不再产出）保留在磁盘上不动：
+
+| 旧命名 | 新命名 |
+|--------|--------|
+| `dump\roadscene_eval_v3_combined_version3_top1` | `dump\roadscene_eval_v3_version3_top1` |
+| `dump\roadscene_eval_m3fd_v5_combined_version0_top1` | `dump\roadscene_eval_v5_version0_top1` |
+| `dump\m3fd_eval_v5_combined_version0_top1` | `dump\m3fd_eval_v5_version0_top1` |
+| `dump\m3fd_eval_roadscene_v2_modemb_version1_top1` | `dump\m3fd_eval_v2_version1_top1` |
+
+要重新跑老结果直接重跑新版 bat 即可，不要手动改老目录的名字（避免和未来其它实验撞车）。
 
 ## 5. 结果解读
 
@@ -113,9 +189,12 @@ RoadScene 的 IR/VIS 标定本身就有 2-5 px 的对齐残差，因此 `overall
 
 | 现象 | 大概率原因 | 应检查 |
 |------|-----------|--------|
-| `unexpected_keys` 里出现 `modality_emb_ir/vis` | `--main_cfg` 没指向训练用的 v_x | 第 4 节 ckpt-cfg 对应表 |
-| `missing_keys` 里出现 backbone 或 transformer 层 | `--main_cfg` arch 与 ckpt arch 不同 | 检查继承链是否完整 |
+| `unexpected_keys` 里出现 `modality_emb_ir/vis` | 自动选到的 cfg 不是训练用的 v_x（多半是 sub-version skip filter 误吃） | echo header 里 `Cfg` 行 + 第 4.3 节对照表 |
+| `missing_keys` 里出现 backbone 或 transformer 层 | cfg arch 与 ckpt arch 不同 | 检查 cfg 继承链是否完整 |
 | 独立 eval 远低于训练 val | 误用了旧版 eval 或 pipeline 不一致 | 先 `git log MyScripts/eval_roadscene.py` 确认是新版 |
 | 独立 eval 远高于训练 val | `--apply_homography` 未开但训练时 H 增强是开的（数据无难度）；或者用了 `crop_HR_visible` | 第 5.4 节 + HR/LR |
 | `overall.txt` 中 `total_matches` 很小 | `--thr` 设高了 / 模型确实退化 | 把 `--thr` 调回训练的 0.1，再看 |
 | 终端 p@3px 抖到 0% | per-pair 单点抖动 | 改看 `overall.txt`，per-match 才是稳定指标 |
+| `[ERROR] no final experiment found for v6 under logs\tb_logs\*_v6_*` | sub-version skip 把唯一目录也滤掉了（极少见，比如目录叫 `xxx_v6_2hidden_finetune`） | 临时把 X 改成全名（如 `6_2hidden`），或重命名实验目录 |
+| `eval_roadscene_finetuned.bat 6` 与 `6_1` 看起来跑了同一个 ckpt | bat 是旧版（没有 sub-version skip filter） | echo header 里 `Experiment` 行应分别是 `m3fd_v6_finetune` 与 `m3fd_v6_1_finetune` |
+| `[WARN] multiple cfgs match eloftr_full_vX_*.py` 触发但选错了 | 同一 X 下有多个 non-subver cfg（比如 `_combined` 和 `_finetune` 都属 v5） | 看 WARN 列出的所有候选，删掉不需要的 cfg，或把脚本里 first-match 的逻辑收紧 |
