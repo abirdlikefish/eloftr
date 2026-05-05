@@ -1,6 +1,6 @@
 ---
 name: eloftr-roadscene-data
-description: Integrate the RoadScene IR-VIS dataset (and any other aligned IR-VIS dataset reusing the same I/O class) into EfficientLoFTR for cross-modal matching. Use when the user mentions RoadScene, cropinfrared, crop_LR_visible / crop_HR_visible, RoadSceneDataset, A3 padding, ROAD_PAD_SIZE, Homography augmentation, mask propagation bugs, "Trying to resize storage", "Calculated padded input size", asks how to add a custom IR-VIS dataset that returns mask0/mask1/homography_0to1, or asks how data_source dispatch works for aligned IR-VIS datasets (RoadScene + M3FD share RoadSceneDataset / spvs_*_roadscene / _compute_roadscene_metrics via is_aligned_irvis / ALIGNED_IRVIS_SOURCES).
+description: Integrate the RoadScene IR-VIS dataset (and any aligned IR-VIS dataset reusing the same I/O class) into EfficientLoFTR for cross-modal matching, plus v7 PC edge cache (cropinfrared_pc/ + crop_LR_visible_pc/). Use when running, debugging, or extending RoadScene data integration. Triggers: RoadScene / cropinfrared / crop_LR_visible / crop_HR_visible / cropinfrared_pc / crop_LR_visible_pc / RoadSceneDataset / A3 padding / ROAD_PAD_SIZE / ROAD_IMG_RESIZE / Homography 增强 / mask 传播 bug / "Trying to resize storage" / "Calculated padded input size" / 加 IR-VIS 数据集 / 加新数据集 / dispatch 白名单 / ALIGNED_IRVIS_SOURCES / is_aligned_irvis / HR vs LR 误用 / PC 缓存 / phase congruency 缓存 / precompute_pc_edges / 跑 RoadScene, English 'add a new aligned IR-VIS dataset', 'mask0/mask1/homography_0to1', 'spvs_coarse_roadscene', '_compute_roadscene_metrics', 'PC cache prerequisite for v7'. Per-version implementation see eloftr-v1..v7 skills.
 ---
 
 # RoadScene IR-VIS 数据集集成（Solution A3）
@@ -9,13 +9,15 @@ description: Integrate the RoadScene IR-VIS dataset (and any other aligned IR-VI
 
 ## ⚠️ 必读：HR vs LR 对齐陷阱
 
-`data/RoadScene/` 下有三个图像目录：
+`data/RoadScene/` 下有三个图像目录 + 两个可选的 PC 缓存子目录：
 
 | 目录 | 是否与 `cropinfrared` 像素对齐 | 用途 |
 |------|------------------------------|------|
-| `cropinfrared`     | —     | IR 输入（image0） |
-| `crop_LR_visible`  | ✅ 同分辨率、同 FoV | 与 IR 配对的 VIS（image1） |
-| `crop_HR_visible`  | ❌ 分辨率更高、FoV 更宽 | 高分辨率参考图，**不能**作为匹配目标 |
+| `cropinfrared`         | —     | IR 输入（image0） |
+| `crop_LR_visible`      | ✅ 同分辨率、同 FoV | 与 IR 配对的 VIS（image1） |
+| `crop_HR_visible`      | ❌ 分辨率更高、FoV 更宽 | 高分辨率参考图，**不能**作为匹配目标 |
+| `cropinfrared_pc/`     | （v7+ 必需） | IR 的 PC 边缘图缓存（与 cropinfrared 一一对应） |
+| `crop_LR_visible_pc/`  | （v7+ 必需） | LR-VIS 的 PC 边缘图缓存 |
 
 早期所有实验默认用 `crop_HR_visible` 训练，监督信号本身就是错的。已经把 7 处默认值统一改成 `crop_LR_visible`：
 
@@ -180,10 +182,35 @@ elif mask_w0 != mask_W0:                                                    # �
 
 当前 split 是 **177 train / 22 val / 22 test**（已用满 221 对）。这个数量级给训练带来两个隐性后果，直接影响 v3/v4 实验的指标解读：
 
-1. **BN running-stat 收敛步数不足**：bs=4 时 ~40 step/epoch，30 epoch 仅 ~1200 step。BN 用 momentum=0.1 EMA 更新 running stats，从 MegaDepth 预训练值漂移到 IR-VIS 域典型需要 ≥3000 步，所以**任何"解冻 fine_preprocess BN"的 v_x 实验都需要至少 80 epoch 或扩数据**才能让 running stats 收敛。已用 v4 REVISION 2 的实测验证（p@1px 暴跌到 0.329 而 p@5px 反超到 0.814）见 [eloftr-cross-modal-experiments §5](../eloftr-cross-modal-experiments/SKILL.md)。
+1. **BN running-stat 收敛步数不足**：bs=4 时 ~40 step/epoch，30 epoch 仅 ~1200 step。BN 用 momentum=0.1 EMA 更新 running stats，从 MegaDepth 预训练值漂移到 IR-VIS 域典型需要 ≥3000 步，所以**任何"解冻 fine_preprocess BN"的 v_x 实验都需要至少 80 epoch 或扩数据**才能让 running stats 收敛。已用 v4 REVISION 2 的实测验证（p@1px 暴跌到 0.329 而 p@5px 反超到 0.814）见 [eloftr-v3-v4-freeze §6](../eloftr-v3-v4-freeze/SKILL.md)。
 2. **过拟合 + val 噪声大**：22 对 val 的 p@3px 单点波动可达 ±0.02-0.03，EarlyStopping patience=8 在小 val 上**容易误触发**；177 train 配 16M 参数模型也很容易在几个 epoch 内 memorize → v3 必须 `FREEZE_BACKBONE=True`（冻 9.5M backbone）才能勉强稳住。
 
-如果想根治这两个问题，**调 split 比例（80→95%）几乎没用**（177→210，仅 +18%，且 val 缩到 11 对反而更不稳），需要走 [eloftr-cross-modal-experiments §6 路径 B](../eloftr-cross-modal-experiments/SKILL.md)：加 LLVIP（~30k 对，已对齐）/ M3FD（~4.2k 对）作为额外 train 数据，**val/test 仍保留 RoadScene 22+22 对**以保证跟 v0-v4 指标公平可比。
+如果想根治这两个问题，**调 split 比例（80→95%）几乎没用**（177→210，仅 +18%，且 val 缩到 11 对反而更不稳），需要走 [eloftr-v5-m3fd](../eloftr-v5-m3fd/SKILL.md)：用 M3FD（~4.2k 对）作为主训数据，**val/test 仍保留 RoadScene 22+22 对**做 OOD 评估。
+
+## 6.1 v7 前置：PC 边缘缓存（cropinfrared_pc/ + crop_LR_visible_pc/）
+
+[v7 (PC + CLAHE 输入端优化)](../eloftr-v7-pcclahe/SKILL.md) 训练 + **OOD eval 在 RoadScene** 都需要 PC 边缘缓存。运行 [MyScripts/precompute_pc_edges.py](../../../MyScripts/precompute_pc_edges.py)（**默认双数据集**，约 35-40 min 一次性）：
+
+```bat
+REM 推荐：RoadScene + M3FD 一起算
+python MyScripts\precompute_pc_edges.py
+REM 或仅 RoadScene
+python MyScripts\precompute_pc_edges.py --dataset RoadScene
+```
+
+输出：
+
+```text
+data/RoadScene/
+├── cropinfrared_pc/      FLIR_*.png   # 与 cropinfrared/ 一一对应（uint8 PNG）
+└── crop_LR_visible_pc/   FLIR_*.png   # 与 crop_LR_visible/ 一一对应
+```
+
+dataset class 通过 `cfg.DATASET.ROAD_IR_PC_SUBDIR='cropinfrared_pc'` + `ROAD_VIS_PC_SUBDIR='crop_LR_visible_pc'` 拼出路径，与 `cfg.LOFTR.USE_EDGE_INPUT=True` 联动决定是否 stack 成 (2, P, P) 张量喂给 stage0 conv（in_channels=2）。
+
+**v0-v6.1 字节级兼容**：dataset `__init__` 的 `if self.use_edge_input:` 守卫保证 v6.1 cfg 重训完全不读 PC cache，张量形状与 v0-v6.1 完全相同（详见 [eloftr-v7-pcclahe R1 dataset 守卫纪律](../eloftr-v7-pcclahe/SKILL.md)）。
+
+> M3FD 的 PC cache (`Ir_pc/` + `Vis_pc/`) 见 [eloftr-m3fd-data §5.5](../eloftr-m3fd-data/SKILL.md)。
 
 ## 7. 最常见错误 → 定位指南
 

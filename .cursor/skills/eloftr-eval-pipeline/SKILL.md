@@ -1,6 +1,6 @@
 ---
 name: eloftr-eval-pipeline
-description: Evaluate EfficientLoFTR checkpoints (official or finetuned v1..v6, including sub-versions like v6_1) on RoadScene IR-VIS or M3FD test splits in a way that exactly matches training-time validation. Use when the user mentions eval_roadscene, eval_m3fd, eval_roadscene_finetuned, eval_m3fd_finetuned, independent eval, "training val higher than independent eval", precision@3px discrepancy, reparameter, overall.txt / summary.csv, official vs finetuned ckpt evaluation, X/Y/Z bat arguments (version / Lightning version / ckpt rank), sub-version v6_1 / v6.1, sub-version skip filter, dump\\<dataset>_eval_v<X>_version<Y>_<topZ|last> naming, or wants to fairly compare baseline vs finetuned numbers across datasets.
+description: Evaluate EfficientLoFTR checkpoints (official or finetuned v1..v7, sub-versions like v6_1, v7 input-side PC+CLAHE) on RoadScene IR-VIS or M3FD test splits, mirroring training-time validation. Use when running, writing, debugging, or interpreting an eval / validation / test script in this repo. Triggers: 模型验证脚本 / 验证脚本 / 评估脚本 / 测试脚本 / 跑测试 / 跑评估 / 测试模型 / 验证模型 / 评估 ckpt / 评估模型效果 / 选最好的 ckpt / 对比 baseline 和 finetune / 跨数据集 / in-domain / OOD / 训练 val 高于独立 eval / PC cache, English 'model validation script', 'evaluation script', 'eval bat', 'evaluate ckpt', 'compare baseline vs finetuned', 'independent eval', 'best checkpoint', 'cross-dataset eval', 'in-domain eval'; names eval_roadscene.py, eval_roadscene_official.bat, eval_roadscene_finetuned.bat, eval_m3fd_finetuned.bat, X/Y/Z bat args, -1 sentinel, sub-version v6_1 / v7_pcclahe, sub-version skip filter, precision@3px, unexpected_keys, FileNotFoundError PC cache, overall.txt / summary.csv, dump\\<dataset>_eval_v<X>_version<Y>_<topZ|last>.
 ---
 
 # Evaluation Pipeline（与训练 val 对齐，支持 RoadScene + M3FD）
@@ -70,6 +70,24 @@ python MyScripts\eval_roadscene.py ^
 - `--img_resize` / `--df`：旧版有，已删，全部由 yacs 提供，确保与训练 numerics 一致。
 - 想换 HR/LR：用 `--vis_subdir crop_HR_visible` 临时覆盖，**只在做 “HR 是否影响很大” 的对比时用**，长期请改 config。
 
+### 3.1 v7 ckpt eval 前置条件（v0-v6.1 ckpt 不需要）
+
+v7 cfg 启用 PC 边缘通道（`USE_EDGE_INPUT=True`），dataset 启动时会校验 PC 缓存目录是否存在。**v7 ckpt eval 之前必须先跑过 PC 预计算**（一次性，~35-40 min）：
+
+```bat
+:: 双击 MyScripts/precompute_pc_edges.bat
+::    (默认行为 = M3FD + RoadScene 双数据集 PC cache, ~35-40 min)
+::    覆盖 v7 训练 + v7 in-domain eval (M3FD) + v7 OOD eval (RoadScene) 全部需求
+```
+
+| eval 命令 | PC cache 需求 | 失败现象（缺失时） |
+|---|---|---|
+| `eval_roadscene_finetuned.bat 1`-`6_1` | **无**（v0-v6.1 cfg 默认 `USE_EDGE_INPUT=False`，dataset 不读 PC 路径）| — |
+| `eval_m3fd_finetuned.bat 1`-`6_1` | **无**（同上，即使 m3fd_trainval.py 设了 `Ir_pc/Vis_pc` 字段，dataset 的 R1 守卫保护不读）| — |
+| `eval_roadscene_official.bat`（官方 ckpt） | **无**（baseline cfg 默认 USE_EDGE_INPUT=False）| — |
+| **`eval_m3fd_finetuned.bat 7`** (v7 in-domain) | **M3FD PC cache** (`data/M3FD_Detection/Ir_pc/`, `Vis_pc/`)| `FileNotFoundError: PC cache directory not found` |
+| **`eval_roadscene_finetuned.bat 7`** (v7 OOD) | **RoadScene PC cache** (`data/RoadScene/cropinfrared_pc/`, `crop_LR_visible_pc/`)| 同上 |
+
 ## 4. Bat 脚本
 
 | 脚本 | 评估集 | CLI |
@@ -118,6 +136,7 @@ ckpt: <EXP>\version_<Y>\checkpoints\
 | `5` | `m3fd_v5_combined` | `eloftr_full_v5_m3fd.py` |
 | `6` | `m3fd_v6_finetune` | `eloftr_full_v6_finetune.py` |
 | `6_1` (= `6.1`) | `m3fd_v6_1_finetune` | `eloftr_full_v6_1_finetune.py` |
+| `7` | `m3fd_v7_pcclahe` | `eloftr_full_v7_pcclahe.py`（PC + CLAHE input-side; 需要 PC cache 已生成） |
 | baseline (官方) | — | `eloftr_full.py`（仅 `eval_roadscene_official.bat` 走这条） |
 
 加载完仍会打印 `missing_keys / unexpected_keys`，理想状态：
@@ -198,3 +217,5 @@ RoadScene 的 IR/VIS 标定本身就有 2-5 px 的对齐残差，因此 `overall
 | `[ERROR] no final experiment found for v6 under logs\tb_logs\*_v6_*` | sub-version skip 把唯一目录也滤掉了（极少见，比如目录叫 `xxx_v6_2hidden_finetune`） | 临时把 X 改成全名（如 `6_2hidden`），或重命名实验目录 |
 | `eval_roadscene_finetuned.bat 6` 与 `6_1` 看起来跑了同一个 ckpt | bat 是旧版（没有 sub-version skip filter） | echo header 里 `Experiment` 行应分别是 `m3fd_v6_finetune` 与 `m3fd_v6_1_finetune` |
 | `[WARN] multiple cfgs match eloftr_full_vX_*.py` 触发但选错了 | 同一 X 下有多个 non-subver cfg（比如 `_combined` 和 `_finetune` 都属 v5） | 看 WARN 列出的所有候选，删掉不需要的 cfg，或把脚本里 first-match 的逻辑收紧 |
+| `RuntimeError: size mismatch for backbone.layer0.rbr_dense.conv.weight ((64,1,3,3) vs (64,2,3,3))` 在 eval 时触发 | v7 cfg 强制 backbone in_ch=2，但传入的 ckpt 是 v0-v6.1 的 in_ch=1，且 `eval_roadscene.py` 的 `build_matcher` **不**调用 `_maybe_inflate_stage0` hook（那个 hook 只在训练时 lightning_loftr.py 内部触发）| 用对应的 cfg：v7 ckpt 用 `eval_*finetuned.bat 7`；v0-v6.1 ckpt 用 `eval_*finetuned.bat 1`-`6_1`，绝不用 X=7 + v0-v6.1 ckpt |
+| `FileNotFoundError: PC cache directory not found: data/M3FD_Detection/Ir_pc` 或 `data/RoadScene/cropinfrared_pc` | v7 cfg 启用 `USE_EDGE_INPUT=True`，dataset `__init__` 校验 PC cache 目录存在但找不到 | 跑一次 `MyScripts/precompute_pc_edges.bat`（默认双数据集，~35-40 min），见 §3.1 v7 prerequisite |

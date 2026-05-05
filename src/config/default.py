@@ -53,6 +53,31 @@ _CN.LOFTR.FREEZE_BACKBONE = False
 _CN.LOFTR.FREEZE_BN = False
 _CN.LOFTR.FREEZE_BACKBONE_BN = False
 
+# -- # v7_pcclahe: input-side cross-modal optimisation (A1 PC edge channel + A2 CLAHE on IR)
+# All flags default to disabled so v0-v6.1 cfg merge yields byte-identical
+# behaviour. Each v7+ config opts in explicitly. See plan v7_pcclahe and the
+# "v0-v6.1 兼容性纪律" section for the three-layer default-value-equality
+# discipline (default.py / data.py getattr fallback / RoadSceneDataset.__init__).
+#
+# BACKBONE_IN_CHANNELS:  stage0 RepVGGBlock in_channels. Default 1 keeps
+#                        v0-v6.1 ckpt loadable without inflation.
+# USE_EDGE_INPUT:        feed Phase Congruency edge map as a 2nd input channel
+#                        alongside the raw image. Requires BACKBONE_IN_CHANNELS=2
+#                        and pre-computed PC cache (run MyScripts/precompute_pc_edges.bat).
+# USE_CLAHE_IR / VIS:    apply CLAHE histogram equalisation on the raw uint8
+#                        IR / VIS image before resize/warp/pad. Boosts contrast
+#                        on narrow-histogram IR. CLAHE is NOT applied to the
+#                        PC channel even when USE_EDGE_INPUT is on.
+# CLAHE_CLIP_LIMIT / CLAHE_TILE_SIZE: standard CLAHE knobs. Tile size is a
+#                        list (yacs override-friendly), converted to tuple
+#                        inside the dataset for cv2.createCLAHE().
+_CN.LOFTR.BACKBONE_IN_CHANNELS = 1
+_CN.LOFTR.USE_EDGE_INPUT = False
+_CN.LOFTR.USE_CLAHE_IR = False
+_CN.LOFTR.USE_CLAHE_VIS = False
+_CN.LOFTR.CLAHE_CLIP_LIMIT = 2.0
+_CN.LOFTR.CLAHE_TILE_SIZE = [8, 8]
+
 # 1. LoFTR-backbone (local feature CNN) config
 _CN.LOFTR.BACKBONE = CN()
 _CN.LOFTR.BACKBONE.BLOCK_DIMS = [64, 128, 256]  # s1, s2, s3
@@ -171,6 +196,17 @@ _CN.DATASET.ROAD_DF = 32              # final H, W are multiples of df
 _CN.DATASET.ROAD_PAD_SIZE = None
 _CN.DATASET.ROAD_HOMOGRAPHY_AUG = True  # train-only random Homography on VIS
 _CN.DATASET.ROAD_HOMOGRAPHY_PROB = 1.0
+
+# -- # v7_pcclahe PC-cache sub-directories (per-dataset because RoadScene uses
+#    snake_case sub-dirs and M3FD uses CapitalCase; default '' = unused).
+#    Each data config (configs/data/<dataset>_trainval.py) sets these
+#    explicitly when it wants to enable PC, e.g.:
+#      m3fd_trainval.py    -> 'Ir_pc'             / 'Vis_pc'
+#      roadscene_trainval.py -> 'cropinfrared_pc' / 'crop_LR_visible_pc'
+#    The dataset class only attempts to load PC when LOFTR.USE_EDGE_INPUT=True;
+#    these sub-dir fields being non-empty alone does NOT trigger PC loading.
+_CN.DATASET.ROAD_IR_PC_SUBDIR = ''
+_CN.DATASET.ROAD_VIS_PC_SUBDIR = ''
 
 _CN.DATASET.NPE_NAME = None
 

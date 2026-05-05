@@ -186,6 +186,17 @@ class RoadSceneDataset(utils_data.Dataset):
                  homography_kwargs: Optional[dict] = None,
                  augment_fn=None,
                  fp16: bool = False,
+                 # v7_pcclahe knobs (all default to disabled = v0-v6.1 behaviour
+                 # byte-identical). Defaults must stay literal-equal to
+                 # src/config/default.py so a missing cfg field still yields
+                 # the same dataset behaviour as the historical pipeline.
+                 use_edge_input: bool = False,
+                 ir_pc_subdir: str = "",
+                 vis_pc_subdir: str = "",
+                 use_clahe_ir: bool = False,
+                 use_clahe_vis: bool = False,
+                 clahe_clip_limit: float = 2.0,
+                 clahe_tile_size=(8, 8),
                  **kwargs):
         super().__init__()
         if mode not in ("train", "val", "test"):
@@ -218,12 +229,69 @@ class RoadSceneDataset(utils_data.Dataset):
         self.augment_fn = augment_fn if mode == "train" else None
         self.fp16 = fp16
 
+        # ------------------------------------------------------------------
+        # v7_pcclahe state (R1 dataset guard discipline + R2 CLAHE worker pickle)
+        # ------------------------------------------------------------------
+        # R1: only the use_edge_input flag triggers PC loading. m3fd_trainval.py
+        # and roadscene_trainval.py BOTH set ROAD_IR_PC_SUBDIR by default so the
+        # field is non-empty for v0-v6.1 retraining too -- but those v_x configs
+        # leave USE_EDGE_INPUT default False, and *that* is what the dataset
+        # checks. Never branch on the subdir field alone.
+        self.use_edge_input = bool(use_edge_input)
+        if self.use_edge_input:
+            if not ir_pc_subdir or not vis_pc_subdir:
+                raise ValueError(
+                    "use_edge_input=True requires non-empty ir_pc_subdir and "
+                    "vis_pc_subdir (set them in the data config; see "
+                    "configs/data/m3fd_trainval.py for an example).")
+            self.ir_pc_dir = osp.join(root_dir, ir_pc_subdir)
+            self.vis_pc_dir = osp.join(root_dir, vis_pc_subdir)
+            if not osp.isdir(self.ir_pc_dir):
+                raise FileNotFoundError(
+                    f"PC cache directory not found: {self.ir_pc_dir}. "
+                    f"Run MyScripts/precompute_pc_edges.bat (defaults to both "
+                    f"M3FD + RoadScene) before any v7_pcclahe training/eval.")
+            if not osp.isdir(self.vis_pc_dir):
+                raise FileNotFoundError(
+                    f"PC cache directory not found: {self.vis_pc_dir}. "
+                    f"Run MyScripts/precompute_pc_edges.bat first.")
+        else:
+            # Crucial: leave PC dirs as None so any accidental access throws
+            # a clear AttributeError instead of silently using a stale path.
+            self.ir_pc_dir = None
+            self.vis_pc_dir = None
+
+        # R2: store CLAHE knobs only; never instantiate cv2.createCLAHE() here.
+        # cv2.CLAHE C++ objects do not pickle reliably across OpenCV 4.x
+        # versions, and Windows DataLoader workers spawn (= pickle the dataset).
+        # The actual cv2.createCLAHE() call is lazy in __getitem__ so each
+        # worker holds its own instance after fork/spawn.
+        self.use_clahe_ir = bool(use_clahe_ir)
+        self.use_clahe_vis = bool(use_clahe_vis)
+        self.clahe_clip_limit = float(clahe_clip_limit)
+        self.clahe_tile_size = tuple(clahe_tile_size)
+        if self.use_clahe_ir or self.use_clahe_vis:
+            from loguru import logger
+            logger.info(
+                f"RoadSceneDataset: CLAHE enabled (clipLimit={self.clahe_clip_limit}, "
+                f"tile={self.clahe_tile_size}, ir={self.use_clahe_ir}, vis={self.use_clahe_vis})")
+
         self.names = _read_index_file(list_path)
         if not self.names:
             raise RuntimeError(f"Empty RoadScene index: {list_path}")
 
     def __len__(self) -> int:
         return len(self.names)
+
+    def _ensure_clahe(self):
+        """R2 lazy init: build cv2.CLAHE on first use within each worker.
+        Avoids pickling the C++ object across DataLoader spawn boundaries."""
+        if not hasattr(self, '_clahe'):
+            self._clahe = cv2.createCLAHE(
+                clipLimit=self.clahe_clip_limit,
+                tileGridSize=self.clahe_tile_size,
+            )
+        return self._clahe
 
     def __getitem__(self, idx: int) -> dict:
         name = self.names[idx]
@@ -238,9 +306,52 @@ class RoadSceneDataset(utils_data.Dataset):
         h0_raw, w0_raw = ir_raw.shape
         h1_raw, w1_raw = vis_raw.shape
 
+        # CLAHE on raw uint8 BEFORE resize/warp/pad. cv2.createCLAHE only
+        # accepts uint8/uint16 inputs (running it after the /255.0 float cast
+        # would error). Order: read -> CLAHE -> resize -> warp -> pad ->
+        # to-float. PC cache is loaded as-is (PC is sparse-edge by design;
+        # CLAHE on PC would destroy that sparsity, so we never apply it).
+        if self.use_clahe_ir:
+            ir_raw = self._ensure_clahe().apply(ir_raw)
+        if self.use_clahe_vis:
+            vis_raw = self._ensure_clahe().apply(vis_raw)
+
+        # Optional PC channel: read once on the raw resolution then carry
+        # alongside the gray channel through every following geometric op
+        # (resize / warp / pad). PC stem matches the source filename (the
+        # precompute script writes <stem>.png regardless of source ext).
+        ir_pc_raw = None
+        vis_pc_raw = None
+        if self.use_edge_input:
+            pc_name = osp.splitext(name)[0] + ".png"
+            ir_pc_path = osp.join(self.ir_pc_dir, pc_name)
+            vis_pc_path = osp.join(self.vis_pc_dir, pc_name)
+            ir_pc_raw = cv2.imread(str(ir_pc_path), cv2.IMREAD_GRAYSCALE)
+            vis_pc_raw = cv2.imread(str(vis_pc_path), cv2.IMREAD_GRAYSCALE)
+            if ir_pc_raw is None:
+                raise FileNotFoundError(
+                    f"Failed to read IR PC cache: {ir_pc_path}. "
+                    f"Run MyScripts/precompute_pc_edges.bat to (re)generate.")
+            if vis_pc_raw is None:
+                raise FileNotFoundError(f"Failed to read VIS PC cache: {vis_pc_path}.")
+            # Sanity: PC cache must match the source resolution exactly,
+            # otherwise the synced resize below would silently misalign.
+            if ir_pc_raw.shape != ir_raw.shape:
+                raise RuntimeError(
+                    f"IR PC cache shape {ir_pc_raw.shape} != raw IR shape "
+                    f"{ir_raw.shape} for {name}. Re-run precompute.")
+            if vis_pc_raw.shape != vis_raw.shape:
+                raise RuntimeError(
+                    f"VIS PC cache shape {vis_pc_raw.shape} != raw VIS shape "
+                    f"{vis_raw.shape} for {name}. Re-run precompute.")
+
         # 1. Resize each image independently (long edge = img_resize, df-aligned).
         ir, h0_r, w0_r = _resize_keep_aspect(ir_raw, self.img_resize, self.df)
         vis, h1_r, w1_r = _resize_keep_aspect(vis_raw, self.img_resize, self.df)
+        if self.use_edge_input:
+            # Reuse the same target shape so PC and gray stay pixel-aligned.
+            ir_pc = cv2.resize(ir_pc_raw, (w0_r, h0_r))
+            vis_pc = cv2.resize(vis_pc_raw, (w1_r, h1_r))
 
         # 2. Optionally warp VIS *before* padding so the Homography is centred on
         # the real VIS content rather than the padded canvas centre.
@@ -252,6 +363,13 @@ class RoadSceneDataset(utils_data.Dataset):
                                           flags=cv2.INTER_LINEAR,
                                           borderMode=cv2.BORDER_CONSTANT,
                                           borderValue=0)
+                if self.use_edge_input:
+                    # Apply the SAME H to the VIS PC channel so PC and gray
+                    # remain pixel-aligned in image1.
+                    vis_pc = cv2.warpPerspective(vis_pc, H_0to1, (w1_r, h1_r),
+                                                 flags=cv2.INTER_LINEAR,
+                                                 borderMode=cv2.BORDER_CONSTANT,
+                                                 borderValue=0)
 
         # 3. Compute the post-warp VIS validity mask in the resized frame.
         # A pixel is valid iff its source pixel (under H^-1) was inside the
@@ -273,8 +391,30 @@ class RoadSceneDataset(utils_data.Dataset):
         vis_pad, mask1 = pad_bottom_right(vis, self.pad_size, ret_mask=True)
         mask1[:h1_r, :w1_r] &= vis_valid
 
-        image0 = torch.from_numpy(ir_pad).float()[None] / 255.0   # (1, P, P)
-        image1 = torch.from_numpy(vis_pad).float()[None] / 255.0
+        if self.use_edge_input:
+            # PC channels share the same gray pad (mask0/mask1 already capture
+            # validity). Use ret_mask=False because we don't need a second mask.
+            # NOTE: pad_bottom_right ALWAYS returns a (padded, mask) tuple --
+            # ret_mask=False just sets mask=None but the tuple is still
+            # returned. We must unpack so np.stack below sees a plain ndarray
+            # rather than a (ndarray, None) tuple (which would trigger a
+            # "setting an array element with a sequence ... inhomogeneous
+            # shape" ValueError on stack).
+            ir_pc_pad, _ = pad_bottom_right(ir_pc, self.pad_size, ret_mask=False)
+            vis_pc_pad, _ = pad_bottom_right(vis_pc, self.pad_size, ret_mask=False)
+            # Stack so channel 0 = gray (post-CLAHE), channel 1 = PC. Inflated
+            # init in lightning_loftr puts v6.1 stage0 weights on channel 0
+            # and zeros on channel 1, so this ordering is load-bearing.
+            image0_np = np.stack([ir_pad, ir_pc_pad], axis=0)        # (2, P, P)
+            image1_np = np.stack([vis_pad, vis_pc_pad], axis=0)
+        else:
+            # v0-v6.1 path: same shape as the historical [None] indexing used to
+            # produce, byte-identical to the previous implementation.
+            image0_np = ir_pad[None]                                  # (1, P, P)
+            image1_np = vis_pad[None]
+
+        image0 = torch.from_numpy(image0_np).float() / 255.0
+        image1 = torch.from_numpy(image1_np).float() / 255.0
         mask0_t = torch.from_numpy(mask0).bool()
         mask1_t = torch.from_numpy(mask1).bool()
 

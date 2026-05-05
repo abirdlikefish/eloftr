@@ -1,6 +1,6 @@
 ---
 name: eloftr-windows-setup
-description: 'Run EfficientLoFTR training and evaluation on Windows with a single GPU. Use when the user hits np.Inf, NCCL, weights_only, DistributedSampler, "Default process group has not been initialized", "Can''t call numpy() on Tensor that requires grad", or "Weights only load failed" / "Unsupported global pytorch_lightning.callbacks.model_checkpoint.ModelCheckpoint" errors when running --ckpt_path or --resume_from_checkpoint, or asks how to set up the conda env / activate cmd vs PowerShell for this repo.'
+description: 'Run EfficientLoFTR training and evaluation on Windows + single GPU + PyTorch 2.6 + NumPy 2.0+ + PL 1.3.5; six compatibility patches plus VRAM spillover cure (expandable_segments). Use when running, debugging, or setting up training/eval on Windows. Triggers: Windows 单卡 / 单卡训练 / NCCL 错误 / np.Inf 错误 / weights_only 报错 / DistributedSampler / 加载 ckpt 报错 / 显存碎片 / spillover / VRAM 16GB / GPU-Util 100 但功耗低 / PCIe 退化 / expandable_segments / PYTORCH_CUDA_ALLOC_CONF / cmd vs PowerShell / 激活 conda 环境 / eff_loftr 环境 / 双击 bat 启动, English ''Default process group has not been initialized'', ''Can''''t call numpy() on Tensor that requires grad'', ''Distributed package doesn''''t have NCCL'', ''Weights only load failed'', ''Unsupported global ModelCheckpoint'', ''GPU spillover'', ''PyTorch allocator fragmentation'', ''CUDA Virtual Memory API''. Spillover cure details for v6.1 see eloftr-v6-finetune.'
 ---
 
 # EfficientLoFTR Windows + 单卡兼容补丁
@@ -38,8 +38,22 @@ description: 'Run EfficientLoFTR training and evaluation on Windows with a singl
 
 - **`reload_dataloaders_every_epoch=False`**（[train.py](../../../train.py)）：避免 PL 在 epoch 边界重建 sampler，否则训练集会重新 shuffle/抽样，单卡也会触发上面的 `DistributedSampler` 路径。
 - **`ModelCheckpoint` 仅在 `not args.disable_ckpt` 时构造**（[train.py](../../../train.py)）：`--disable_ckpt` 调试时不建 callback，避免在 RoadScene 这种没有 `auc@10` 的任务上报 monitor 找不到。
-- **EarlyStopping 已经从 `--disable_ckpt` 分支里独立出来**（[train.py](../../../train.py) 第 151-168 行）：所以 debug 脚本即便 `--disable_ckpt` 也会触发 EarlyStopping，详见 `eloftr-cross-modal-experiments` skill 的 v3 章节。
+- **EarlyStopping 已经从 `--disable_ckpt` 分支里独立出来**（[train.py](../../../train.py) 第 151-168 行）：所以 debug 脚本即便 `--disable_ckpt` 也会触发 EarlyStopping，详见 [eloftr-v3-v4-freeze §4](../eloftr-v3-v4-freeze/SKILL.md)。
 - **TensorBoard 在 Windows 默认会把 tag 里的 `/` 当目录**：项目里所有自定义 metric 用 `precision@3px` 这种 `@` 命名而不是 `precision/3px`。
+
+## 3.1 VRAM Spillover Cure：expandable_segments（PyTorch allocator 碎片化）
+
+长时间 finetune（如 v6 50 epoch）在 16GB VRAM + 多个非训练 GPU 进程并存时，会出现"GPU-Util 100% + 功耗远低于 TDP + per-step 时间从 7s 飙到 80s"指纹，是 PyTorch caching allocator (slab-based) 的内部碎片化导致 fallback 到 shared GPU memory（PCIe 退化 22×）。
+
+**Cure**：在 .bat 里 `python` 之前加：
+
+```bat
+set PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+```
+
+把 PyTorch allocator 切到 CUDA Virtual Memory API（虚拟连续段，物理页可不连续），消除碎片可能性。代价：每个 segment 第一次分配多 ~2-3 ms。
+
+完整诊断与 v6.1 实测验证见 [eloftr-v6-finetune §6 v6.1 spillover hotfix](../eloftr-v6-finetune/SKILL.md)。配套操作 SOP：用任务管理器关掉非训练 GPU 应用（Cursor / Edge / Steam / NVIDIA App / 浏览器 WebGL 标签页），从独立 WindowsTerminal 双击 .bat 启动而不要从 Cursor 集成终端启动。
 
 ## 4. 常见症状 → 这里找答案
 
@@ -51,7 +65,7 @@ description: 'Run EfficientLoFTR training and evaluation on Windows with a singl
 - `Weights only load failed` + 报错来自 PL 内部（栈上有 `pytorch_lightning/utilities/cloud_io.py` / `checkpoint_connector.restore`），通常发生在 `--resume_from_checkpoint`：表 6。
 - `--disable_ckpt` 下 EarlyStopping 没生效：见上一节第 3 条。
 
-> 注意：`--ckpt_path` 与 `--resume_from_checkpoint` 是两个完全不同的 flag。前者只把权重灌进 `matcher`（warm start），不恢复 optimizer / scheduler / global_step；后者才是 PL 真正的断点续训。详见 `eloftr-cross-modal-experiments` skill 的 v3 章节。
+> 注意：`--ckpt_path` 与 `--resume_from_checkpoint` 是两个完全不同的 flag。前者只把权重灌进 `matcher`（warm start），不恢复 optimizer / scheduler / global_step；后者才是 PL 真正的断点续训。详见 [eloftr-v6-finetune §3 --ckpt_path 在本仓的精确语义](../eloftr-v6-finetune/SKILL.md)。
 
 ## 5. 想加新 Windows 兼容补丁时
 

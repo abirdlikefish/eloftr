@@ -42,6 +42,77 @@ def reparameter(matcher):
     return matcher
 
 
+def _maybe_inflate_stage0(state_dict, backbone, alpha=0.0):
+    """Inflate the backbone stage0 (a.k.a. layer0 in ``RepVGG_8_1_align``) conv
+    weights from ``in_ch=1`` to ``in_ch=2`` when the model expects 2 channels
+    but the ckpt was saved with 1.
+
+    Why this exists
+    ---------------
+    v7_pcclahe stacks a Phase Congruency edge map alongside the raw image and
+    sets ``cfg.LOFTR.BACKBONE_IN_CHANNELS=2`` so stage0's first conv accepts
+    ``(64, 2, 3, 3)`` weights. v6.1 ckpt was trained with in_ch=1, giving
+    ``(64, 1, 3, 3)`` weights. ``load_state_dict(strict=False)`` does NOT
+    handle shape mismatches -- it would raise ``RuntimeError: size mismatch``
+    on every key. ``strict`` only relaxes the *key set*, not shapes.
+
+    This helper re-shapes the two affected weights in-place inside the ckpt's
+    state_dict before ``load_state_dict`` is called:
+
+      ``(64, 1, 3, 3)`` -> ``(64, 2, 3, 3)`` via ``cat([w_old, w_old * alpha])``
+
+    With ``alpha=0`` (the default for v7) the PC channel weight is exactly 0,
+    so stage0's forward output is mathematically identical to v6.1 at epoch 0.
+    Training pushes it away from 0 from epoch 1 onward.
+
+    v0-v6.1 backwards compatibility
+    -------------------------------
+    When the model itself is built with ``in_channels=1`` (which is the
+    default for every v0-v6.1 cfg because ``BACKBONE_IN_CHANNELS`` defaults to
+    1 in ``src/config/default.py``), ``target_in_ch == 1`` matches the ckpt
+    and this function is a no-op (no inflate, no log line). The v0-v6.1 retrain
+    / eval log output is therefore byte-identical to before this helper landed.
+
+    Both ckpt key conventions are handled
+    -------------------------------------
+    PL-saved ckpts (everything trained in this repo) prefix every key with
+    ``matcher.`` because ``PL_LoFTR.matcher = LoFTR(...)``. The official
+    ``eloftr_outdoor.ckpt`` is a bare LoFTR state_dict with no prefix.
+    ``LoFTR.load_state_dict`` (see ``src/loftr/loftr.py``) strips the
+    ``matcher.`` prefix on the way in, but we run BEFORE that, so we look for
+    both forms.
+    """
+    target_in_ch = backbone.layer0.rbr_dense.conv.in_channels
+    keys_to_check = [
+        # PL-saved: keys still carry the ``matcher.`` prefix at this point.
+        'matcher.backbone.layer0.rbr_dense.conv.weight',
+        'matcher.backbone.layer0.rbr_1x1.conv.weight',
+        # Official / bare LoFTR ckpt: no prefix.
+        'backbone.layer0.rbr_dense.conv.weight',
+        'backbone.layer0.rbr_1x1.conv.weight',
+    ]
+    inflated_any = False
+    for k in keys_to_check:
+        if k not in state_dict:
+            continue
+        w_old = state_dict[k]
+        if w_old.shape[1] == target_in_ch:
+            continue                                            # v0-v6.1 path: skip silently
+        if w_old.shape[1] == 1 and target_in_ch == 2:
+            w_pc = w_old * alpha                                # alpha=0 -> all zeros
+            state_dict[k] = torch.cat([w_old, w_pc], dim=1)     # (out, 1, K, K) -> (out, 2, K, K)
+            inflated_any = True
+        else:
+            raise RuntimeError(
+                f"Cannot inflate {k}: ckpt in_ch={w_old.shape[1]}, "
+                f"model in_ch={target_in_ch}; only 1->2 inflate is supported")
+    if inflated_any:
+        logger.info(
+            f"Inflated stage0 conv weights: 1ch -> 2ch (alpha={alpha}, "
+            f"PC channel zero-initialized; gate 12 should pass)")
+    return state_dict
+
+
 class PL_LoFTR(pl.LightningModule):
     def __init__(self, config, pretrained_ckpt=None, profiler=None, dump_dir=None):
         """
@@ -63,6 +134,12 @@ class PL_LoFTR(pl.LightningModule):
         # Pretrained weights
         if pretrained_ckpt:
             state_dict = torch.load(pretrained_ckpt, map_location='cpu', weights_only=False)['state_dict']
+            # v7_pcclahe: when the v7 model is built with in_channels=2 but
+            # we resume from a v6.1 (or earlier) ckpt that was trained with
+            # in_channels=1, inflate the two stage0 conv weights so
+            # load_state_dict shape-matches. No-op when in_channels match
+            # (which is every v0-v6.1 cfg) -- see _maybe_inflate_stage0.
+            state_dict = _maybe_inflate_stage0(state_dict, self.matcher.backbone, alpha=0.0)
             msg=self.matcher.load_state_dict(state_dict, strict=False)
             logger.info(f"Load \'{pretrained_ckpt}\' as pretrained checkpoint")
             # Explicitly surface mismatched keys so we can verify that any

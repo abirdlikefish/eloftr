@@ -6,11 +6,18 @@ class RepVGG_8_1_align(nn.Module):
     """
     RepVGG backbone, output resolution are 1/8 and 1.
     Each block has 2 layers.
+
+    in_channels defaults to 1 (single-channel grayscale input, byte-identical
+    to v0-v6.1). v7_pcclahe passes in_channels=2 via cfg.LOFTR.BACKBONE_IN_CHANNELS
+    to accept the (gray, PC) 2-channel input. Only stage0's first conv shape
+    changes; everything after stage0 produces channel counts independent of
+    in_channels, so the rest of the network is byte-identical between v6.1
+    and v7 once stage0 is inflated.
     """
 
-    def __init__(self, config):
+    def __init__(self, config, in_channels=1):
         super().__init__()
-        backbone = create_RepVGG(False)
+        backbone = create_RepVGG(False, in_channels=in_channels)
 
         self.layer0, self.layer1, self.layer2, self.layer3 = backbone.stage0, backbone.stage1, backbone.stage2, backbone.stage3
 

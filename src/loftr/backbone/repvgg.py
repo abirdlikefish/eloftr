@@ -148,7 +148,7 @@ class RepVGGBlock(nn.Module):
 
 class RepVGG(nn.Module):
 
-    def __init__(self, num_blocks, num_classes=1000, width_multiplier=None, override_groups_map=None, deploy=False, use_se=False, use_checkpoint=False):
+    def __init__(self, num_blocks, num_classes=1000, width_multiplier=None, override_groups_map=None, deploy=False, use_se=False, use_checkpoint=False, in_channels=1):
         super(RepVGG, self).__init__()
         assert len(width_multiplier) == 4
         self.deploy = deploy
@@ -158,7 +158,11 @@ class RepVGG(nn.Module):
         self.use_checkpoint = use_checkpoint
 
         self.in_planes = min(64, int(64 * width_multiplier[0]))
-        self.stage0 = RepVGGBlock(in_channels=1, out_channels=self.in_planes, kernel_size=3, stride=2, padding=1, deploy=self.deploy, use_se=self.use_se)
+        # in_channels=1 (default) keeps stage0 weight shape (out_planes, 1, 3, 3),
+        # byte-identical to v0-v6.1. v7_pcclahe sets cfg.LOFTR.BACKBONE_IN_CHANNELS=2
+        # to accept the (gray, PC) 2-channel input; v6.1 ckpt is auto-inflated by
+        # _maybe_inflate_stage0 in lightning_loftr.py before load_state_dict.
+        self.stage0 = RepVGGBlock(in_channels=in_channels, out_channels=self.in_planes, kernel_size=3, stride=2, padding=1, deploy=self.deploy, use_se=self.use_se)
         self.cur_layer_idx = 1
         self.stage1 = self._make_stage(int(64 * width_multiplier[0]), num_blocks[0], stride=1)
         self.stage2 = self._make_stage(int(128 * width_multiplier[1]), num_blocks[1], stride=2)
@@ -193,9 +197,10 @@ optional_groupwise_layers = [2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26]
 g2_map = {l: 2 for l in optional_groupwise_layers}
 g4_map = {l: 4 for l in optional_groupwise_layers}
 
-def create_RepVGG(deploy=False, use_checkpoint=False):
+def create_RepVGG(deploy=False, use_checkpoint=False, in_channels=1):
     return RepVGG(num_blocks=[2, 4, 14, 1], num_classes=1000,
-                  width_multiplier=[1, 1, 1, 2.5], override_groups_map=None, deploy=deploy, use_checkpoint=use_checkpoint)
+                  width_multiplier=[1, 1, 1, 2.5], override_groups_map=None,
+                  deploy=deploy, use_checkpoint=use_checkpoint, in_channels=in_channels)
 
 #   Use this for converting a RepVGG model or a bigger model with RepVGG as its component
 #   Use like this

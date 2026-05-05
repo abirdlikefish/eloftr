@@ -194,6 +194,19 @@ def build_dataset(cfg, args: argparse.Namespace) -> RoadSceneDataset:
         homography_aug=homography_aug,
         homography_prob=getattr(ds_cfg, "ROAD_HOMOGRAPHY_PROB", 1.0),
         homography_kwargs=dict(getattr(ds_cfg, "ROAD_HOMOGRAPHY_KWARGS", {})),
+        # v7_pcclahe knobs. Mirror src/lightning/data.py's pass-through so
+        # eval_*_finetuned.bat 7 (v7 ckpt eval) builds a dataset with the
+        # same 2-channel (gray + PC) + CLAHE pre-processing as training.
+        # Three-layer default-value equality (R3): the fallback literals
+        # here MUST match src/config/default.py and RoadSceneDataset.__init__
+        # so historical ckpt eval (v0-v6.1) stays byte-identical to before.
+        use_edge_input=getattr(cfg.LOFTR, "USE_EDGE_INPUT", False),
+        ir_pc_subdir=getattr(ds_cfg, "ROAD_IR_PC_SUBDIR", ""),
+        vis_pc_subdir=getattr(ds_cfg, "ROAD_VIS_PC_SUBDIR", ""),
+        use_clahe_ir=getattr(cfg.LOFTR, "USE_CLAHE_IR", False),
+        use_clahe_vis=getattr(cfg.LOFTR, "USE_CLAHE_VIS", False),
+        clahe_clip_limit=getattr(cfg.LOFTR, "CLAHE_CLIP_LIMIT", 2.0),
+        clahe_tile_size=getattr(cfg.LOFTR, "CLAHE_TILE_SIZE", [8, 8]),
     )
 
 

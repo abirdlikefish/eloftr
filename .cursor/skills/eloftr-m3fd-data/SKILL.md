@@ -1,6 +1,6 @@
 ---
 name: eloftr-m3fd-data
-description: Integrate the M3FD_Detection IR-VIS dataset (TarDAL CVPR'22) into EfficientLoFTR as a second aligned-IR-VIS data_source alongside RoadScene. Use when the user mentions M3FD, M3FD_Detection, M3FD_Fusion, TarDAL, JinyuanLiu-CV/TarDAL, the Ir / Vis sub-folders, the 4200 image-pair count, make_m3fd_splits, m3fd_trainval, ALIGNED_IRVIS_SOURCES, is_aligned_irvis, "add a new aligned IR-VIS dataset", "M3FD epoch only 50 step instead of 945", N_SAMPLES_PER_SUBSET, SB_SUBSET_SAMPLE_REPLACEMENT, "RoadScene-only training is overfitting / data too small", or wants to do M3FD pretrain plus RoadScene finetune (two-stage cross-modal training).
+description: Integrate the M3FD_Detection IR-VIS dataset (TarDAL CVPR'22, 4200 aligned pairs) into EfficientLoFTR as a second aligned-IR-VIS data_source alongside RoadScene; also covers v7 PC edge cache (Ir_pc/ + Vis_pc/). Use when running, debugging, or extending M3FD data integration. Triggers: M3FD / M3FD_Detection / M3FD_Fusion / TarDAL / Ir 子目录 / Vis 子目录 / Ir_pc / Vis_pc / 加 M3FD / 接入 M3FD / 跑 M3FD / make_m3fd_splits / m3fd_trainval / 90/5/5 切分 / 加新数据集 / 加新 IR-VIS 数据集 / N_SAMPLES_PER_SUBSET / SB_SUBSET_SAMPLE_REPLACEMENT / 进度条 50 vs 945 / 单 batch 多源 assert / PC 缓存 / phase congruency 缓存 / precompute_pc_edges, English 'add a new aligned IR-VIS dataset', 'M3FD baseline', 'ALIGNED_IRVIS_SOURCES', 'is_aligned_irvis', '4200 image pairs', 'M3FD epoch only 50 step instead of 945', 'RoadScene-only training overfitting', 'PC cache prerequisite for v7'. Per-version implementation see eloftr-v5-m3fd / eloftr-v6-finetune / eloftr-v7-pcclahe.
 ---
 
 # M3FD_Detection 跨模态数据集接入
@@ -35,9 +35,13 @@ M3FD_Detection 有两个独立子集，**只用 Detection 那 4200 对训练**�
 data/M3FD_Detection/
 ├── Ir/         # 4200 张 PNG，00000.png .. 04199.png
 ├── Vis/        # 4200 张 PNG，文件名与 Ir 一一对应
+├── Ir_pc/      # 4200 张 PNG（**v7+ 必需**，由 precompute_pc_edges.py 生成）
+├── Vis_pc/     # 4200 张 PNG（**v7+ 必需**）
 ├── Annotation/ # YOLO 检测标签（不需要，可以删）
 └── index/      # 由 make_m3fd_splits.py 生成（见第 2 节）
 ```
+
+> `Ir_pc/` 与 `Vis_pc/` 仅 v7 (PC + CLAHE 输入端优化) 训练 / eval 时需要。v0-v6.1 完全不读这两个子目录。生成方式与文件名约定见下方 §5.5。
 
 **两个与 RoadScene 不同的细节**（都通过 config 解决，**不动代码**）：
 
@@ -143,11 +147,11 @@ flowchart LR
 > cfg.TRAINER.N_SAMPLES_PER_SUBSET         = 3780
 > cfg.TRAINER.SB_SUBSET_SAMPLE_REPLACEMENT = False
 > ```
-> 完整机制 + 进度条诊断 + 为什么 default.py 不能改见 [eloftr-cross-modal-experiments §4.5](../eloftr-cross-modal-experiments/SKILL.md)。
+> 完整机制 + 进度条诊断 + 为什么 default.py 不能改见 [eloftr-v5-m3fd §2 sampler 默认值陷阱](../eloftr-v5-m3fd/SKILL.md)。
 
-**v5 已实现并跑完**——见 [configs/loftr/eloftr_full_v5_m3fd.py](../../../configs/loftr/eloftr_full_v5_m3fd.py) 与 [run_m3fd_v5_combined.bat](../../../MyScripts/run_m3fd_v5_combined.bat) / [run_m3fd_v5_small.bat](../../../MyScripts/run_m3fd_v5_small.bat) / [run_m3fd_v5_debug.bat](../../../MyScripts/run_m3fd_v5_debug.bat)。v5 继承 v4 REVISION 2 全部架构改动（FREEZE_BACKBONE_BN=True / InfoNCE / modemb），只重写 schedule（WARMUP_STEP=20、MSLR=[3,5,7]、ES patience=3、max_epochs=10），并显式加上述两个 sampler override。完整设计动机、实测预期、判定标准见 [eloftr-cross-modal-experiments §6 路径 B](../eloftr-cross-modal-experiments/SKILL.md) 和 §7 实验对应表。
+**v5 已实现并跑完**——见 [configs/loftr/eloftr_full_v5_m3fd.py](../../../configs/loftr/eloftr_full_v5_m3fd.py) 与 [run_m3fd_v5_combined.bat](../../../MyScripts/run_m3fd_v5_combined.bat) / [run_m3fd_v5_small.bat](../../../MyScripts/run_m3fd_v5_small.bat) / [run_m3fd_v5_debug.bat](../../../MyScripts/run_m3fd_v5_debug.bat)。v5 继承 v4 REVISION 2 全部架构改动（FREEZE_BACKBONE_BN=True / InfoNCE / modemb），只重写 schedule（WARMUP_STEP=20、MSLR=[3,5,7]、ES patience=3、max_epochs=10），并显式加上述两个 sampler override。完整设计动机、实测预期、判定标准见 [eloftr-v5-m3fd](../eloftr-v5-m3fd/SKILL.md)。
 
-### v5 实测速览（详情见 [eloftr-cross-modal-experiments §5.6](../eloftr-cross-modal-experiments/SKILL.md)）
+### v5 实测速览（详情见 [eloftr-v5-m3fd](../eloftr-v5-m3fd/SKILL.md)）
 
 | 维度 | v5 (M3FD-train, ep9) | 对比基准 |
 |---|---|---|
@@ -160,7 +164,32 @@ flowchart LR
 
 **核心结论**：v5 学到了真正的通用 IR-VIS 表示，OOD 全面碾压 v2；唯一短板是 in-domain p@1 仍低，由 v6 (v5 ckpt resume + 慢 LR 精修) 补足。
 
-**v6 已实现**——见 [configs/loftr/eloftr_full_v6_finetune.py](../../../configs/loftr/eloftr_full_v6_finetune.py) 和 [run_m3fd_v6_finetune.bat](../../../MyScripts/run_m3fd_v6_finetune.bat)。设计动机详见 [eloftr-cross-modal-experiments §6 路径 D](../eloftr-cross-modal-experiments/SKILL.md)。
+**v6 已实现**——见 [configs/loftr/eloftr_full_v6_finetune.py](../../../configs/loftr/eloftr_full_v6_finetune.py) 和 [run_m3fd_v6_finetune.bat](../../../MyScripts/run_m3fd_v6_finetune.bat)。设计动机详见 [eloftr-v6-finetune](../eloftr-v6-finetune/SKILL.md)。
+
+## 5.5 v7 前置：PC 边缘缓存（Ir_pc/ + Vis_pc/）
+
+[v7 (PC + CLAHE 输入端优化)](../eloftr-v7-pcclahe/SKILL.md) 训练前必须先生成 PC（Phase Congruency）边缘图缓存。运行 [MyScripts/precompute_pc_edges.py](../../../MyScripts/precompute_pc_edges.py)（**默认双数据集**，约 35-40 min 一次性）：
+
+```bat
+REM 推荐：两个数据集一起算（RoadScene OOD eval 也要用）
+python MyScripts\precompute_pc_edges.py
+REM 或仅 M3FD
+python MyScripts\precompute_pc_edges.py --dataset M3FD
+```
+
+输出：
+
+```text
+data/M3FD_Detection/
+├── Ir_pc/    00000.png .. 04199.png   # 与 Ir/ 一一对应，文件名相同
+└── Vis_pc/   00000.png .. 04199.png   # 与 Vis/ 一一对应
+```
+
+每张是 PC magnitude（uint8 PNG，lossless）。dataset class 通过 `cfg.DATASET.ROAD_IR_PC_SUBDIR='Ir_pc'` + `ROAD_VIS_PC_SUBDIR='Vis_pc'` 拼出路径，与 `cfg.LOFTR.USE_EDGE_INPUT=True` 联动决定是否 stack 成 (2, P, P) 张量喂给 stage0 conv（in_channels=2）。
+
+**v0-v6.1 字节级兼容**：dataset `__init__` 的 `if self.use_edge_input:` 守卫保证 v6.1 cfg 重训完全不读 PC cache，张量形状与 v0-v6.1 完全相同（详见 [eloftr-v7-pcclahe R1 dataset 守卫纪律](../eloftr-v7-pcclahe/SKILL.md)）。
+
+> v7 OOD eval（在 RoadScene 跑）需要 RoadScene PC cache（`cropinfrared_pc/` + `crop_LR_visible_pc/`），见 [eloftr-roadscene-data](../eloftr-roadscene-data/SKILL.md) PC cache 节。`precompute_pc_edges.py` 默认两个数据集一起生成，跑一次即可。
 
 ## 6. 评估：复用 eval_roadscene.py，换 list_path 即可
 
@@ -193,7 +222,7 @@ python MyScripts\eval_roadscene.py ^
 | **v2 v1 ep62** (RS-train) | p@1=0.7567 p@3=0.8086 p@5=0.8151 mpe=1.97 | p@1=0.1192 p@3=0.4971 p@5=0.6948 mpe=4.66 | `roadscene_eval_v2_modemb_version1_top1` / `m3fd_eval_roadscene_v2_modemb_version1_top1` |
 | **v5 v0 ep9** (M3FD-train) | p@1=0.1858 p@3=0.5989 p@5=0.7825 mpe=3.39 | p@1=0.4352 p@3=0.8072 p@5=0.8777 mpe=2.07 | `roadscene_eval_m3fd_v5_combined_version0_top1` / `m3fd_eval_v5_combined_version0_top1` |
 
-**v5 OOD 全面优于 v2 OOD**（详细分析见 [eloftr-cross-modal-experiments §5.6](../eloftr-cross-modal-experiments/SKILL.md)）。命名规则：dump 目录名 = `<eval_dataset>_eval_<train_exp>_<version>_<ckpt_tag>`，第一个前缀（`roadscene_eval_*` / `m3fd_eval_*`）表示**评估**用的数据集，与 ckpt 训练时用的数据集独立。
+**v5 OOD 全面优于 v2 OOD**（详细分析见 [eloftr-v5-m3fd](../eloftr-v5-m3fd/SKILL.md)）。命名规则：dump 目录名 = `dump\<eval_dataset>_eval_v<X>_version<Y>_<topZ|last>`，第一个前缀（`roadscene_eval_*` / `m3fd_eval_*`）表示**评估**用的数据集，与 ckpt 训练时用的数据集独立。详细 eval 命名见 [eloftr-eval-pipeline](../eloftr-eval-pipeline/SKILL.md)。
 
 ## 7. 加新对齐 IR-VIS 数据集的样板（M3FD 之后想加 MSRS / LLVIP / TNO）
 
@@ -217,7 +246,7 @@ python MyScripts\eval_roadscene.py ^
 | 启动日志没出现 `building RoadSceneDataset (dataset_name=...)` | `TRAINVAL_DATA_SOURCE` 拼写不对 / 没在 `ALIGNED_IRVIS_SOURCES` 里 | 检查 [src/utils/data_source.py](../../../src/utils/data_source.py) 与 `configs/data/m3fd_trainval.py` 第 1 节 |
 | `FileNotFoundError: ...Ir\\00xxx.png` | `ROAD_IR_SUBDIR` 大小写写错 | M3FD 必须 `Ir` / `Vis`，不是 `ir` / `vis`（Linux 大小写敏感） |
 | `KeyError: 'depth0'` / `'T_0to1'` | dispatch 落到 ScanNet/MegaDepth 分支 | 见上 |
-| **PL 进度条第 0 epoch 显示 `Epoch 0: ... 50/260` 而非 `945/1155`** | LoFTR config 漏了 `N_SAMPLES_PER_SUBSET=3780` + `SB_SUBSET_SAMPLE_REPLACEMENT=False` 两个 sampler override | 见本节上方 ⚠️ 提示 + [eloftr-cross-modal-experiments §4.5](../eloftr-cross-modal-experiments/SKILL.md)。v5_m3fd.py 已加，新写 v6+ M3FD/LLVIP/KAIST config 必须 opt-in |
+| **PL 进度条第 0 epoch 显示 `Epoch 0: ... 50/260` 而非 `945/1155`** | LoFTR config 漏了 `N_SAMPLES_PER_SUBSET=3780` + `SB_SUBSET_SAMPLE_REPLACEMENT=False` 两个 sampler override | 见本节上方 ⚠️ 提示 + [eloftr-cross-modal-experiments §3 RandomConcatSampler 默认值](../eloftr-cross-modal-experiments/SKILL.md) + [eloftr-v5-m3fd §2](../eloftr-v5-m3fd/SKILL.md)。v5_m3fd.py 已加，新写 v6+ M3FD/LLVIP/KAIST config 必须 opt-in |
 | `RuntimeError: Early stopping conditioned on metric 'auc@10' which is not available` 第 1 个 val epoch 末崩溃 | `train.py` 的 monitor 选择没走 `is_aligned_irvis(...)`，`'M3FD'` 落到 `auc@10` else 分支；而对齐 IR-VIS 数据集只产 `precision@{1,3,5}px` | 已修：[train.py](../../../train.py) 现在用 `is_aligned_irvis(config.DATASET.TRAINVAL_DATA_SOURCE)` 选 monitor metric，新增 IR-VIS 数据集只要进 `ALIGNED_IRVIS_SOURCES` 就自动监控 `precision@3px`，**严禁**改回字面量比较 |
 | `Calculated padded input size per channel: (36 x 0)` | Mask 经 Homography 后非矩形（Bug A） | 见 [eloftr-roadscene-data §4](../eloftr-roadscene-data/SKILL.md)（已修） |
 | `Sizes of tensors must match except in dimension 1/2.` | 双维度同时被裁但只 pad 了一维（Bug B） | 见 [eloftr-roadscene-data §4](../eloftr-roadscene-data/SKILL.md)（已修） |

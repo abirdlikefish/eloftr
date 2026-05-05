@@ -90,6 +90,18 @@ class MultiSceneDataModule(pl.LightningDataModule):
         self.road_homography_kwargs = dict(getattr(config.DATASET,
                                                   'ROAD_HOMOGRAPHY_KWARGS', {}))
 
+        # v7_pcclahe input-side options. R3 three-layer default-value equality:
+        # the fallback literals here MUST match src/config/default.py and
+        # RoadSceneDataset.__init__ defaults so a missing yacs field still
+        # yields the v0-v6.1 byte-identical "everything off" behaviour.
+        self.use_edge_input = getattr(config.LOFTR, 'USE_EDGE_INPUT', False)
+        self.use_clahe_ir = getattr(config.LOFTR, 'USE_CLAHE_IR', False)
+        self.use_clahe_vis = getattr(config.LOFTR, 'USE_CLAHE_VIS', False)
+        self.clahe_clip_limit = getattr(config.LOFTR, 'CLAHE_CLIP_LIMIT', 2.0)
+        self.clahe_tile_size = getattr(config.LOFTR, 'CLAHE_TILE_SIZE', [8, 8])
+        self.road_ir_pc_subdir = getattr(config.DATASET, 'ROAD_IR_PC_SUBDIR', '')
+        self.road_vis_pc_subdir = getattr(config.DATASET, 'ROAD_VIS_PC_SUBDIR', '')
+
         self.fp16 = config.DATASET.FP16
 
         # 3.loader parameters
@@ -253,6 +265,14 @@ class MultiSceneDataModule(pl.LightningDataModule):
                 homography_kwargs=self.road_homography_kwargs,
                 augment_fn=(self.augment_fn if mode == 'train' else None),
                 fp16=self.fp16,
+                # v7_pcclahe (defaults to all-off so v0-v6.1 cfg is byte-identical)
+                use_edge_input=self.use_edge_input,
+                ir_pc_subdir=self.road_ir_pc_subdir,
+                vis_pc_subdir=self.road_vis_pc_subdir,
+                use_clahe_ir=self.use_clahe_ir,
+                use_clahe_vis=self.use_clahe_vis,
+                clahe_clip_limit=self.clahe_clip_limit,
+                clahe_tile_size=self.clahe_tile_size,
             )
             return ConcatDataset([ds])
 
