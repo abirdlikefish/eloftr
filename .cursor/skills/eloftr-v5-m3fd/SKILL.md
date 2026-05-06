@@ -138,7 +138,7 @@ v2 RoadScene-train 的 in-domain p@1=0.7567 跨到 M3FD 直接崩到 0.1192—�
 
 短板归因：
 1. **v5 effective LR 太高**：v5 epoch 0-3 一直跑 1.25e-4，是 v2 同期 ~2e-5 的 6 倍。fine sub-pixel offset 在高 LR 下永久震荡，无法精细收敛 → 由 [eloftr-v6-finetune](../eloftr-v6-finetune/SKILL.md) 慢 LR resume 解决。
-2. **结构性瓶颈**：modemb 在 fine 路径完全失效（[eloftr-v2-modemb §modemb 信号路径](../eloftr-v2-modemb/SKILL.md)），fine_matching 对模态盲 → 留给 v7+ MSBN/FiLM。
+2. **结构性瓶颈**：modemb 在 fine 路径完全失效（[eloftr-v2-modemb §modemb 信号路径](../eloftr-v2-modemb/SKILL.md)），fine_matching 对模态盲 → v7 走输入端 PC+CLAHE 间接缓解（[eloftr-v7-pcclahe](../eloftr-v7-pcclahe/SKILL.md)），**v8 走 fine 架构 MSBN 直接破解**（[eloftr-v8-msbn](../eloftr-v8-msbn/SKILL.md)）。
 
 ## 9. v6+ 联合训练候选（未实现）
 

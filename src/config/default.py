@@ -53,6 +53,50 @@ _CN.LOFTR.FREEZE_BACKBONE = False
 _CN.LOFTR.FREEZE_BN = False
 _CN.LOFTR.FREEZE_BACKBONE_BN = False
 
+# -- # v8: Modality-Specific BatchNorm on fine_preprocess (cross-modal §4 E1)
+# When USE_MSBN=True, layer{1,2}_outconv2.1 (the 2 BNs in fine_preprocess)
+# are replaced by nn.Identity() and a pair of (bn_ir / bn_vis) is added
+# beside each. fine_preprocess.forward routes IR features through bn_ir and
+# VIS through bn_vis. Default False keeps v0-v7 ckpt loadable byte-identically
+# (no key changes, no architectural changes, no log changes).
+#
+# FREEZE_FINE_BN_IR / VIS: ablation knobs to freeze only one MSBN branch.
+# Use case v8.1 (freeze_ir): tests if VIS-only adaptation suffices given v7
+# has already trained IR/PC features well.
+#
+# Freeze field interaction (5 fields, OR semantics, no priority chain):
+#   - All freeze fields (FREEZE_BACKBONE / FREEZE_BN / FREEZE_BACKBONE_BN /
+#     FREEZE_FINE_BN_IR / FREEZE_FINE_BN_VIS) are INDEPENDENT and ADDITIVE.
+#   - For any param p: p is frozen iff ANY freeze field whose scope includes
+#     p is set to True. Repeated freeze (e.g. FREEZE_BN=T and
+#     FREEZE_BACKBONE_BN=T together cover backbone BN twice) is IDEMPOTENT
+#     -- no side effect (m.eval() and p.requires_grad=False are safe to
+#     call multiple times).
+#   - This replaces v0-v7's if/elif "priority chain" with 5 independent if's
+#     in lightning_loftr.py. Behavior is byte-identical to v0-v7 because no
+#     v0-v7 cfg sets multiple BN-freeze fields simultaneously.
+#   - FREEZE_FINE_BN_IR/VIS are meaningful only when USE_MSBN=True (otherwise
+#     fine_preprocess has no _bn_ir/_bn_vis attrs; helpers silent no-op via
+#     getattr defense + a debug warning is emitted).
+#
+# Three-layer default-value discipline (mirrors v7 R3):
+#   default.py (yacs CN):                   _CN.LOFTR.USE_MSBN = False
+#   lightning_loftr.py (yacs CN access):    config.LOFTR.get('USE_MSBN', False)
+#   loftr.py / fine_preprocess.py (dict):   config.get('use_msbn', False)
+#                                           (key lower-cased by lower_config())
+# All three layers must give "do nothing" so v0-v7 cfg merge yields
+# byte-identical behaviour to before this field landed.
+#
+# Considered but DEFERRED to future v8.x ablations (not added now to keep
+# v8 cfg surface minimal, per cross-modal §6 "incremental field addition"):
+#   MSBN_ALPHA  (vis = ir x alpha): currently always 1.0, no flexibility need
+#   MSBN_INIT   ('zero-shift'/'random'): for v8.2 random-init ablation
+#   USE_MSBN_LAYER1/LAYER2: per-layer MSBN toggle, over-engineered
+#   MSBN_REGULARIZATION_WEIGHT: zero-shift + shared conv already constrains
+_CN.LOFTR.USE_MSBN              = False
+_CN.LOFTR.FREEZE_FINE_BN_IR     = False
+_CN.LOFTR.FREEZE_FINE_BN_VIS    = False
+
 # -- # v7_pcclahe: input-side cross-modal optimisation (A1 PC edge channel + A2 CLAHE on IR)
 # All flags default to disabled so v0-v6.1 cfg merge yields byte-identical
 # behaviour. Each v7+ config opts in explicitly. See plan v7_pcclahe and the

@@ -103,7 +103,7 @@ softmax_matrix_f = F.softmax(conf_matrix_f, 1) * F.softmax(conf_matrix_f, 2)
 | coarse transformer 输出 / fine_preprocess 前 | fine_preprocess 2 BN 归零 | ❌ 无效 |
 | fine_preprocess 输出 / fine_matching 前 | fine_matching argmax 对常数偏置免疫 | ❌ **无效** |
 
-**所以"再加两个常数向量给 fine"是无效设计**。要让 fine 真懂模态，必须破解"BN 吃 bias + argmax 吃 bias"两个机制——三条候选见 [eloftr-cross-modal-experiments §4 候选路径 E](../eloftr-cross-modal-experiments/SKILL.md)（MSBN / FiLM / cosine + modemb）。v7 选了正交路径（输入端 PC + CLAHE），见 [eloftr-v7-pcclahe](../eloftr-v7-pcclahe/SKILL.md)。
+**所以"再加两个常数向量给 fine"是无效设计**。要让 fine 真懂模态，必须破解"BN 吃 bias + argmax 吃 bias"两个机制——三条候选见 [eloftr-cross-modal-experiments §4 候选路径 E](../eloftr-cross-modal-experiments/SKILL.md)（MSBN / FiLM / cosine + modemb）。v7 选了正交路径（输入端 PC + CLAHE，[eloftr-v7-pcclahe](../eloftr-v7-pcclahe/SKILL.md)），**v8 实现了 E1 MSBN**（fine_preprocess BN 拆 IR/VIS 双分支，[eloftr-v8-msbn](../eloftr-v8-msbn/SKILL.md)），实测 in-domain p@1 +10.4% rel 但 OOD p@1 -4.7% rel — 印证了 fine 模态盲假设但揭示了 dataset-specific overfit trade-off。
 
 > v5 的 p@1px=0.435 在 in-domain 已是 v4 REV2 (0.329) 的 1.32×，证明 fine BN 收敛了，但 fine 路径对模态盲是结构性短板，**单靠继续训练 v5 无法把 p@1 推过 ~0.55**。这是 v6 (resume + 慢 LR) 与 v7+ (fine-modemb) 的分工边界。
 

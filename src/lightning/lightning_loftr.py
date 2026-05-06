@@ -113,6 +113,101 @@ def _maybe_inflate_stage0(state_dict, backbone, alpha=0.0):
     return state_dict
 
 
+def _maybe_inflate_msbn(state_dict, model):
+    """v8: Bridge a v0-v7 ckpt's single ``layer{1,2}_outconv2.1.*`` (the
+    BatchNorm weights/buffers inside the original Sequential) to v8's
+    Modality-Specific BN layout where each layer has been replaced by an
+    ``nn.Identity()`` placeholder + two named BN attrs ``_bn_ir`` / ``_bn_vis``.
+
+    Why this exists
+    ---------------
+    v8 sets ``USE_MSBN=True`` and ``fine_preprocess.layer{1,2}_outconv2.1`` is
+    ``nn.Identity()`` -- it has NO state_dict keys. The MSBN branches live at
+    ``layer{1,2}_outconv2_bn_ir`` and ``layer{1,2}_outconv2_bn_vis``. The v7
+    ckpt has 5 keys per layer at the original ``.1.*`` location. Without
+    this hook:
+      - 10 ``unexpected_keys`` warnings (v7 ckpt has ``.1.*`` but v8 model
+        does not register them via Identity)
+      - 20 ``missing_keys`` warnings (v8 model registers ``_bn_ir/_bn_vis.*``
+        but v7 ckpt has neither)
+      - The new BN branches stay at PyTorch defaults (gamma=1, beta=0,
+        running_mean=0, running_var=1) instead of inheriting v7's well-tuned
+        statistics -> v8 epoch 0 would NOT be byte-identical to v7 ep 6.
+
+    Operation per layer (5 BN keys each)
+    ------------------------------------
+    For each ``k_orig`` in
+    ``{weight, bias, running_mean, running_var, num_batches_tracked}``:
+      1. Copy contents to ``..._bn_ir.<suffix>``  (new key)
+      2. Copy contents to ``..._bn_vis.<suffix>`` (new key, == _bn_ir; this
+         is "zero-shift" init: the two MSBN branches start identical to v7
+         and only diverge as training accumulates per-modality EMA stats)
+      3. Pop original ``..._outconv2.1.<suffix>`` (no longer in v8 state_dict)
+    Net key delta: -5 + 10 = +5 per layer * 2 layers = +10 keys total.
+
+    Triggering
+    ----------
+    Only runs when:
+      (a) ``model.fine_preprocess.use_msbn == True`` AND
+      (b) the ckpt does NOT already contain MSBN keys (so v8 ckpt -> v8
+          model is a no-op without log noise).
+    Otherwise silent no-op + no log line. This preserves byte-identical
+    behaviour for every v0-v7 cfg (USE_MSBN defaults to False).
+
+    Both ckpt key conventions are handled
+    -------------------------------------
+    Same as ``_maybe_inflate_stage0``: PL-saved ckpts carry the
+    ``matcher.`` prefix; bare official ckpts do not. We detect both.
+    """
+    use_msbn = bool(getattr(model.fine_preprocess, 'use_msbn', False))
+    if not use_msbn:
+        return state_dict
+
+    # If ckpt already has MSBN keys, this is a v8->v8 resume; don't re-inflate.
+    has_msbn_keys = any(
+        '_outconv2_bn_ir.' in k or '_outconv2_bn_vis.' in k
+        for k in state_dict
+    )
+    if has_msbn_keys:
+        return state_dict
+
+    bn_suffixes = ('weight', 'bias', 'running_mean', 'running_var', 'num_batches_tracked')
+    bn_channels = {  # (block_dims default; only used for log message)
+        'layer2_outconv2': model.fine_preprocess.layer2_outconv2_bn_ir.weight.shape[0],
+        'layer1_outconv2': model.fine_preprocess.layer1_outconv2_bn_ir.weight.shape[0],
+    }
+    inflated_any = False
+    for layer_name in ('layer2_outconv2', 'layer1_outconv2'):
+        # Try both prefixes (PL-saved with `matcher.` and bare).
+        for prefix in ('matcher.fine_preprocess.', 'fine_preprocess.'):
+            base_orig = f'{prefix}{layer_name}.1.'
+            # Quick check: is this prefix-orig key actually present?
+            if not any(k.startswith(base_orig) for k in state_dict):
+                continue
+            base_ir  = f'{prefix}{layer_name}_bn_ir.'
+            base_vis = f'{prefix}{layer_name}_bn_vis.'
+            for suffix in bn_suffixes:
+                k_orig = base_orig + suffix
+                if k_orig not in state_dict:
+                    continue
+                tensor = state_dict[k_orig]
+                state_dict[base_ir  + suffix] = tensor.clone()
+                state_dict[base_vis + suffix] = tensor.clone()
+                state_dict.pop(k_orig)
+            inflated_any = True
+            logger.info(
+                f"MSBN inflated {layer_name}.1 ({bn_channels[layer_name]}ch) "
+                f"-> bn_ir + bn_vis (zero-shift, 5 keys -> 10 keys)")
+            break   # found the prefix that matched, don't try the other
+    if not inflated_any:
+        logger.warning(
+            "MSBN inflate hook found no matching layer{1,2}_outconv2.1.* keys "
+            "in the ckpt; v8 _bn_ir/_bn_vis stay at PyTorch defaults "
+            "(gamma=1, beta=0). This means epoch 0 will NOT be byte-identical "
+            "to the v7 ckpt -- check ckpt path / cfg.")
+    return state_dict
+
+
 class PL_LoFTR(pl.LightningModule):
     def __init__(self, config, pretrained_ckpt=None, profiler=None, dump_dir=None):
         """
@@ -140,6 +235,10 @@ class PL_LoFTR(pl.LightningModule):
             # load_state_dict shape-matches. No-op when in_channels match
             # (which is every v0-v6.1 cfg) -- see _maybe_inflate_stage0.
             state_dict = _maybe_inflate_stage0(state_dict, self.matcher.backbone, alpha=0.0)
+            # v8: bridge v0-v7 single-BN ckpt to v8 MSBN dual-BN model. No-op
+            # when use_msbn=False (every v0-v7 cfg) or when ckpt already has
+            # MSBN keys (v8 -> v8 resume). See _maybe_inflate_msbn for spec.
+            state_dict = _maybe_inflate_msbn(state_dict, self.matcher)
             msg=self.matcher.load_state_dict(state_dict, strict=False)
             logger.info(f"Load \'{pretrained_ckpt}\' as pretrained checkpoint")
             # Explicitly surface mismatched keys so we can verify that any
@@ -153,23 +252,59 @@ class PL_LoFTR(pl.LightningModule):
 
         # Optional freezing for small-dataset finetune (must run AFTER the
         # pretrained ckpt is loaded so load_state_dict still happens on the
-        # full trainable graph). Both flags default to False, so behaviour is
+        # full trainable graph). All flags default to False, so behaviour is
         # unchanged for v0/v1/v2 runs.
+        #
+        # v8 OR-semantics refactor: 5 freeze fields are INDEPENDENT and ADDITIVE.
+        # For any param p: p is frozen iff ANY freeze field whose scope includes
+        # p is set to True. Repeated freeze (e.g. FREEZE_BN=T also covers
+        # backbone BN already covered by FREEZE_BACKBONE_BN=T) is IDEMPOTENT --
+        # m.eval() and p.requires_grad=False are safe to call multiple times.
+        # Behaviour is byte-identical to the v0-v7 if/elif scheme because no
+        # v0-v7 cfg sets multiple BN-freeze fields simultaneously (each cfg
+        # used at most one of FREEZE_BN / FREEZE_BACKBONE_BN, never both).
+        # The v8-new fields FREEZE_FINE_BN_IR / FREEZE_FINE_BN_VIS only kick in
+        # when USE_MSBN=True and fine_preprocess has _bn_ir/_bn_vis attrs;
+        # otherwise the helpers silent no-op via getattr defense.
         self._freeze_bn          = bool(config.LOFTR.get('FREEZE_BN', False))
         self._freeze_backbone_bn = bool(config.LOFTR.get('FREEZE_BACKBONE_BN', False))
+        # v8-new: FREEZE_FINE_BN_IR / VIS. Use cfg.LOFTR.get(..., False) so that
+        # when default.py has not yet defined the fields (during incremental
+        # implementation), the call falls back to False and behaviour stays
+        # byte-identical to v0-v7.
+        self._freeze_fine_bn_ir  = bool(config.LOFTR.get('FREEZE_FINE_BN_IR',  False))
+        self._freeze_fine_bn_vis = bool(config.LOFTR.get('FREEZE_FINE_BN_VIS', False))
+        # Debug-aid warning when MSBN-specific freeze flags are set without
+        # USE_MSBN=True (the fine_preprocess will not have _bn_ir/_bn_vis
+        # attrs so the helpers silent no-op anyway, but the user probably
+        # made a cfg mistake).
+        if (self._freeze_fine_bn_ir or self._freeze_fine_bn_vis) and \
+                not bool(config.LOFTR.get('USE_MSBN', False)):
+            logger.warning(
+                "FREEZE_FINE_BN_IR/VIS set but USE_MSBN=False -> "
+                "fine_preprocess has no _bn_ir/_bn_vis attrs; helpers will silent no-op")
+
         if config.LOFTR.get('FREEZE_BACKBONE', False):
             for p in self.matcher.backbone.parameters():
                 p.requires_grad = False
             n_frozen = sum(p.numel() for p in self.matcher.backbone.parameters())
             logger.info(f"Froze backbone: {n_frozen/1e6:.2f}M params")
+
+        # 5 BN-related freeze fields, OR semantics, idempotent. No priority
+        # chain: each field independently freezes its own scope. Repeated
+        # m.eval() / p.requires_grad=False are no-op when already applied.
         if self._freeze_bn:
             self._apply_freeze_bn()
             logger.info("Froze all BatchNorm2d layers (eval-mode + no-grad)")
-        # FREEZE_BN takes precedence: when all BN already frozen above, skip the
-        # backbone-only branch to avoid redundant work and a misleading log line.
-        if self._freeze_backbone_bn and not self._freeze_bn:
+        if self._freeze_backbone_bn:
             self._apply_freeze_backbone_bn()
             logger.info("Froze backbone BatchNorm2d layers (eval-mode + no-grad); fine_preprocess BN remains trainable")
+        if self._freeze_fine_bn_ir:
+            self._apply_freeze_fine_bn_ir()
+            logger.info("Froze fine_preprocess _bn_ir layers (eval-mode + no-grad)")
+        if self._freeze_fine_bn_vis:
+            self._apply_freeze_fine_bn_vis()
+            logger.info("Froze fine_preprocess _bn_vis layers (eval-mode + no-grad)")
 
         n_trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
         n_total = sum(p.numel() for p in self.parameters())
@@ -205,18 +340,54 @@ class PL_LoFTR(pl.LightningModule):
                 for p in m.parameters():
                     p.requires_grad = False
 
+    def _apply_freeze_fine_bn_ir(self):
+        """v8 MSBN: freeze fine_preprocess.layer{1,2}_outconv2_bn_ir (the IR
+        branch of the modality-specific BN pair). Uses getattr defense so that
+        when USE_MSBN=False (the v0-v7 path where fine_preprocess has no
+        _bn_ir/_bn_vis attrs) this helper silently no-ops -- no error, no log.
+        Called once in __init__ AND from `train()` to survive PL's per-epoch
+        model.train() that would otherwise re-enable BN train-mode.
+        """
+        fp = self.matcher.fine_preprocess
+        for name in ('layer2_outconv2_bn_ir', 'layer1_outconv2_bn_ir'):
+            m = getattr(fp, name, None)
+            if m is None:
+                continue                                            # USE_MSBN=False: silent no-op
+            m.eval()
+            for p in m.parameters():
+                p.requires_grad = False
+
+    def _apply_freeze_fine_bn_vis(self):
+        """v8 MSBN: same as _apply_freeze_fine_bn_ir but for the VIS branch."""
+        fp = self.matcher.fine_preprocess
+        for name in ('layer2_outconv2_bn_vis', 'layer1_outconv2_bn_vis'):
+            m = getattr(fp, name, None)
+            if m is None:
+                continue                                            # USE_MSBN=False: silent no-op
+            m.eval()
+            for p in m.parameters():
+                p.requires_grad = False
+
     def train(self, mode=True):
         """Override to keep frozen BN layers in eval-mode across PL's per-epoch
         model.train() calls. Without this, freezing BN in __init__ would only
-        last until the first epoch boundary. The if/elif ensures FREEZE_BN
-        (all BN) takes precedence over FREEZE_BACKBONE_BN (backbone BN only)
-        so v3 (FREEZE_BN=True) is never double-frozen even if both flags are
-        set."""
+        last until the first epoch boundary.
+
+        v8 OR-semantics refactor: 5 freeze fields are applied independently
+        (each is an `if`, not `if/elif`). Repeated m.eval() / requires_grad=
+        False are idempotent so no harm if multiple flags overlap. The v0-v7
+        if/elif scheme is byte-identical to this new structure for any v0-v7
+        cfg (which only sets at most one BN-freeze field at a time).
+        """
         super().train(mode)
         if getattr(self, '_freeze_bn', False):
             self._apply_freeze_bn()
-        elif getattr(self, '_freeze_backbone_bn', False):
+        if getattr(self, '_freeze_backbone_bn', False):
             self._apply_freeze_backbone_bn()
+        if getattr(self, '_freeze_fine_bn_ir', False):
+            self._apply_freeze_fine_bn_ir()
+        if getattr(self, '_freeze_fine_bn_vis', False):
+            self._apply_freeze_fine_bn_vis()
         return self
 
     def configure_optimizers(self):
@@ -357,6 +528,35 @@ class PL_LoFTR(pl.LightningModule):
                     'train/mod_emb_vis_norm',
                     self.matcher.modality_emb_vis.detach().norm().item(),
                     self.global_step)
+
+            # v8 MSBN diagnostics: track how far the IR/VIS BN branches have
+            # diverged from the zero-shift starting point. bn_drift_ratio is
+            # the key gate-16 metric: should grow from ~0 at ep0 to >0.05 by
+            # ep5 if MSBN is actually doing something. If it stays near 0,
+            # the IR/VIS distributions are too similar (likely PC+CLAHE has
+            # already aligned them in earlier layers) and MSBN adds nothing.
+            # gate(getattr) so v0-v7 (USE_MSBN=False) writes zero new scalars
+            # -> TB log byte-identical to before this block landed.
+            if getattr(self.matcher.fine_preprocess, 'use_msbn', False):
+                fp = self.matcher.fine_preprocess
+                eps = 1e-8
+                for layer_name in ('layer2', 'layer1'):
+                    bn_ir  = getattr(fp, f'{layer_name}_outconv2_bn_ir')
+                    bn_vis = getattr(fp, f'{layer_name}_outconv2_bn_vis')
+                    m_ir  = bn_ir.running_mean.detach()
+                    m_vis = bn_vis.running_mean.detach()
+                    # Drift ratio: |mean_ir - mean_vis| / (|mean_ir| + |mean_vis| + eps)
+                    drift = ((m_ir - m_vis).norm() /
+                             (m_ir.norm() + m_vis.norm() + eps)).item()
+                    self.logger.experiment.add_scalar(
+                        f'train/bn_drift_ratio_{layer_name}', drift, self.global_step)
+                    # Gamma L2 norms: visualise per-branch affine learning
+                    self.logger.experiment.add_scalar(
+                        f'train/bn_ir_gamma_l2_{layer_name}',
+                        bn_ir.weight.detach().norm().item(), self.global_step)
+                    self.logger.experiment.add_scalar(
+                        f'train/bn_vis_gamma_l2_{layer_name}',
+                        bn_vis.weight.detach().norm().item(), self.global_step)
 
             # figures
             if self.config.TRAINER.ENABLE_PLOTTING:

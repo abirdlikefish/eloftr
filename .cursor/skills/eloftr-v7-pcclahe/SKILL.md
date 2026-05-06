@@ -20,7 +20,7 @@ description: EfficientLoFTR v7 cross-modal experiment - input-side optimization,
 1. **IR/VIS 亮度域差异**：M3FD IR 直方图在 80-120 区间窄峰分布，VIS 接近 0-255 全段均匀分布。stage0 conv 必须"补偿"这个差异，但 conv 权重训了 9450 步后已饱和。CLAHE 提前把 IR 拉伸成均匀分布，理论上能减轻 conv 的负担。
 2. **IR/VIS 几何域不变性未被利用**：IR/VIS 在亮度上完全不一致，但**物体边界位置**完全一致（物理上由几何决定）。原图 backbone 必须在亮度域里学这个"边界共识"，效率低。Phase Congruency（Kovesi 1999 经典模态不变特征）直接提供"频率对齐 → 亮度无关"的边缘强度图，作为第二通道喂给 stage0 conv。
 
-v7 与 [eloftr-cross-modal-experiments §4 候选路径 E](../eloftr-cross-modal-experiments/SKILL.md)（MSBN / FiLM / cosine + modemb fine 架构改）**互补**：路径 E 改架构破解 fine 模态盲；v7 在输入端用经典图像处理先验补齐"模态不变特征"和"统计分布对齐"。
+v7 与 [eloftr-cross-modal-experiments §4 候选路径 E](../eloftr-cross-modal-experiments/SKILL.md)（MSBN / FiLM / cosine + modemb fine 架构改）**互补**：路径 E 改架构破解 fine 模态盲；v7 在输入端用经典图像处理先验补齐"模态不变特征"和"统计分布对齐"。**v8 实现了 E1 MSBN**（fine_preprocess BN 拆 IR/VIS 双分支，[eloftr-v8-msbn](../eloftr-v8-msbn/SKILL.md)），实测 in-domain p@1 +10.4% rel 但 OOD p@1 -4.7% rel — 揭示了"输入端模态不变 (v7) vs fine 架构 dataset-specific 适应 (v8)"的边界, v7 仍是双向 SOTA 的毕设最终交付。
 
 ## 2. 工程组合（A1 + A2 合并 v7）
 

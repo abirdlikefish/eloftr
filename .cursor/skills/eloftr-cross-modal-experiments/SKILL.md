@@ -1,19 +1,21 @@
 ---
 name: eloftr-cross-modal-experiments
-description: Index / overview of EfficientLoFTR cross-modal experiment chain v0..v7 - inheritance graph, sampler / LR pitfalls, candidate paths A-F (实现 vs 未实现), and how-to-add-new-version playbook. Use when user asks about the chain as a whole, comparing versions, planning v8, ablation strategy, or specific topics not tied to one version. Per-version implementation details live in eloftr-v1-contrast / eloftr-v2-modemb / eloftr-v3-v4-freeze / eloftr-v5-m3fd / eloftr-v6-finetune / eloftr-v7-pcclahe. Triggers: 跨模态实验 / 实验链 / v0 v1 v2 v3 v4 v5 v6 v7 总览 / 继承链 / 加新版本 / 路线图 / 决策树 / 候选路径 ABCDEF / 工程惯例 / WARMUP_STEP 自动缩放陷阱 / RandomConcatSampler 默认值 / N_SAMPLES_PER_SUBSET / SB_SUBSET_SAMPLE_REPLACEMENT / "epoch progress bar 50/260 vs 945/1155", English 'experiment chain', 'how to add v8', 'cross-modal roadmap', 'WARMUP scaling gotcha', 'sampler subset quota'. For specific version implementation see the v_x sub-skill.
+description: Index / overview of EfficientLoFTR cross-modal experiment chain v0..v8(+v9 server repro) - inheritance graph, sampler / LR pitfalls (single-GPU + multi-GPU 4× LR amplification trap), candidate paths A-F (实现 vs 未实现), and how-to-add-new-version playbook. Use when user asks about the chain as a whole, comparing versions, planning v9 / v10+, ablation strategy, or specific topics not tied to one version. Per-version implementation details live in eloftr-v1-contrast / eloftr-v2-modemb / eloftr-v3-v4-freeze / eloftr-v5-m3fd / eloftr-v6-finetune / eloftr-v7-pcclahe / eloftr-v8-msbn; Linux 4-GPU server reproduction (= v9) lives in eloftr-server-multigpu. Triggers: 跨模态实验 / 实验链 / v0 v1 v2 v3 v4 v5 v6 v7 v8 v9 总览 / 继承链 / 加新版本 / 路线图 / 决策树 / 候选路径 ABCDEF / 工程惯例 / WARMUP_STEP 自动缩放陷阱 / RandomConcatSampler 默认值 / N_SAMPLES_PER_SUBSET / SB_SUBSET_SAMPLE_REPLACEMENT / "epoch progress bar 50/260 vs 945/1155" / 多卡 LR 4 倍 / sync_bn MSBN, English 'experiment chain', 'how to add v10', 'cross-modal roadmap', 'WARMUP scaling gotcha single-GPU', 'WARMUP scaling gotcha multi-GPU', 'sampler subset quota', 'RandomConcatSampler not sharded for aligned IR-VIS'. For specific version implementation see the v_x sub-skill; for server / multi-GPU runtime see eloftr-server-multigpu.
 ---
 
-# Cross-Modal 实验链总览（v0..v7）
+# Cross-Modal 实验链总览（v0..v8）
 
-> 这是 7 个跨模态实验的 **index / overview**。每个版本的实现细节、配置、实测、Bat 入口都在独立 skill：
+> 这是 8 个跨模态实验的 **index / overview**。每个版本的实现细节、配置、实测、Bat 入口都在独立 skill：
 > - [eloftr-v1-contrast](../eloftr-v1-contrast/SKILL.md)：Symmetric InfoNCE
 > - [eloftr-v2-modemb](../eloftr-v2-modemb/SKILL.md)：Modality embedding（含 fine 模态盲分析）
 > - [eloftr-v3-v4-freeze](../eloftr-v3-v4-freeze/SKILL.md)：Freeze stack 与 REVISION 2
 > - [eloftr-v5-m3fd](../eloftr-v5-m3fd/SKILL.md)：M3FD 数据扩展（路径 B）
 > - [eloftr-v6-finetune](../eloftr-v6-finetune/SKILL.md)：v6 / v6.1 慢 LR resume + spillover 修复（路径 D）
-> - [eloftr-v7-pcclahe](../eloftr-v7-pcclahe/SKILL.md)：PC 边缘 + CLAHE 输入端优化（路径 F）
+> - [eloftr-v7-pcclahe](../eloftr-v7-pcclahe/SKILL.md)：PC 边缘 + CLAHE 输入端优化（路径 F, **双向 SOTA, 毕设最终交付**）
+> - [eloftr-v8-msbn](../eloftr-v8-msbn/SKILL.md)：Modality-Specific BatchNorm fine 架构（路径 E1, in-domain SOTA 但 OOD 略退）
+> - [eloftr-server-multigpu](../eloftr-server-multigpu/SKILL.md)：v9 = 在 4 卡 3090 服务器复现 v8（Linux + DDP 多卡 5 个隐藏地雷）
 >
-> 前置：[eloftr-roadscene-data](../eloftr-roadscene-data/SKILL.md) + [eloftr-windows-setup](../eloftr-windows-setup/SKILL.md)；评估侧 [eloftr-eval-pipeline](../eloftr-eval-pipeline/SKILL.md)。
+> 前置：[eloftr-roadscene-data](../eloftr-roadscene-data/SKILL.md) + [eloftr-windows-setup](../eloftr-windows-setup/SKILL.md)；评估侧 [eloftr-eval-pipeline](../eloftr-eval-pipeline/SKILL.md)；服务器侧 [eloftr-server-multigpu](../eloftr-server-multigpu/SKILL.md)。
 
 ## 0. 继承链总览
 
@@ -27,6 +29,8 @@ flowchart LR
     v5 --> v6["v6_finetune.py<br/>从 v5 ep9 ckpt resume<br/>+ CANONICAL_LR 2e-3 → 4e-4 (TRUE_LR=2.5e-5)<br/>+ WARMUP_STEP 20 → 50<br/>+ MSLR=[15,25,35] + ES patience=12<br/>专攻 p@1px (--max_epochs=50 in .bat)<br/>实测 ep6 spillover 中断"]
     v6 --> v6_1["v6_1_finetune.py (zero override)<br/>从 v6 ep6 ckpt resume<br/>+ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True (in .bat)<br/>schedule 完全继承 v6"]
     v6_1 --> v7["v7_pcclahe.py (input-side optimization)<br/>从 v6.1 ep4 ckpt resume<br/>+ A1: PC edge map as 2nd input channel (BACKBONE_IN_CHANNELS=2)<br/>+ A2: CLAHE on raw IR (USE_CLAHE_IR=True)<br/>+ inflated init alpha=0 (zero-extend v6.1 stage0 conv)<br/>schedule 继承 v6.1, max_epochs=10<br/>实测 ep6 = v0-v7 全程双向 SOTA<br/>(in-domain +7.2% / OOD +20.5% vs v6.1 ep4)"]
+    v7 --> v8["v8_msbn.py (fine-arch optimization, path E1)<br/>从 v7 ep6 ckpt resume<br/>+ USE_MSBN=True: fine_preprocess.layer{1,2}_outconv2.1 (BN)<br/>  替换为 nn.Identity, 新增 _bn_ir / _bn_vis 双分支<br/>+ Identity 占位法: state_dict key 字节级 = v7 (USE_MSBN=False)<br/>+ _maybe_inflate_msbn ckpt hook (zero-shift 复制 v7 BN -> 双分支)<br/>+ freeze 体系 OR 语义重构 (5 字段独立 if 平铺)<br/>+ schedule 修复 v7 死代码: WARMUP=30 / MSLR=[6,11,15] / ES=8<br/>+ max_epochs=20 (v7 是 10)<br/>实测 ep16 = in-domain SOTA (+10.4% p@1 vs v7)<br/>但 OOD p@1 -4.7% (4.34σ 显著退化), 不严格符合强成功"]
+    v8 --> v9["v9_server_repro (Linux + 4 卡 3090, infra layer)<br/>cfg / 代码继承 v8 完全不变<br/>+ 服务器 SSH 接入 + Cursor Remote-SSH<br/>+ .bat → .sh / Win 单卡补丁全部保留 (DDP 兼容)<br/>+ 模式 A 单卡复现 (★ 推荐) / B DDP 改 cfg / C 并行 ablation<br/>+ §4.1-4.5 五个 DDP 隐藏地雷 (LR 4× / sync_bn × MSBN /<br/>  RandomConcatSampler 不分片 / 非确定性 / 大 batch gap)<br/>详见 eloftr-server-multigpu"]
 ```
 
 每个 v_x 配置只 `from <previous> import cfg` 然后修改若干字段，**强制累计**：v4 一定包含 v1+v2 的全部能力（loss_contrast / modemb），所以 ablation 时只需要改 main_cfg_path，不需要再编辑代码。
@@ -59,6 +63,25 @@ WARMUP_STEP = math.floor(WARMUP_STEP / _scaling)       # WARMUP 反向放大！
 - **`MSLR_MILESTONES` 必须 < `EARLY_STOPPING_PATIENCE` + 典型见顶 epoch**，否则 ES 在第一次 LR decay 之前就触发，整套 schedule 等于没用。
 - **train_loss 一直降但 val 在 epoch 3-6 见顶后回落** = 过拟合，不是"还没收敛"。再加 epoch 没用，要么冻结、要么早停、要么换更强正则。
 
+### 2.1 多卡场景下同一公式被反向放大 4-8 倍（v9+ 必看）
+
+当 `--gpus=4` 时 `WORLD_SIZE=4`，`TRUE_BATCH_SIZE = 4 × 4 = 16`，`_scaling = 16/64 = 0.25`：
+
+| 配置 | TRUE_LR (vs 单卡 v8) | WARMUP step | 风险 |
+|---|---|---|---|
+| 单卡 bs=4 (v0..v8 baseline) | 2.5e-5 | 30 | baseline |
+| 4 卡 bs=4 | **1e-4 (4×)** | **120 (4×)** | v8 MSBN zero-shift 立刻被破坏，Gate 15 极可能失败 |
+| 4 卡 bs=8 | **2e-4 (8×)** | **240 (8×)** | warmup > 1 epoch，全程低 LR |
+
+修复模板（让 4 卡 effective LR ≈ 单卡 v8）：
+
+```python
+cfg.TRAINER.CANONICAL_LR = 4e-4 / 4         # 1e-4，4 卡时 _scaling=0.25 → TRUE_LR=2.5e-5
+cfg.TRAINER.WARMUP_STEP = math.ceil(30 * 0.25)  # 7 → floor(7/0.25)=28 ≈ 30
+```
+
+完整多卡 5 个隐藏地雷（LR 灾 / sync_bn × MSBN / RandomConcatSampler 不分片 / 非确定性 / 大 batch gap）+ v9 = 复现 v8 的精确改动清单见 [eloftr-server-multigpu](../eloftr-server-multigpu/SKILL.md)。
+
 ## 3. 必看坑：RandomConcatSampler 默认值在单数据源场景下静默欠采样
 
 LoFTR 的训练 sampler ([src/datasets/sampler.py](../../../src/datasets/sampler.py)) 是为 ScanNet/MegaDepth 的"多场景"结构设计的——每个 .npz = 一个 scene = sampler 眼里的一个 subset，每 epoch 从**每个 subset 抽 200 个样本**。`N_SAMPLES_PER_SUBSET=200` 是 **per-scene quota**，不是 per-dataset budget。
@@ -72,6 +95,8 @@ RoadScene/M3FD 每个数据集只有一个扁平图像列表，[src/lightning/da
 
 详见 [eloftr-v5-m3fd §2 sampler 默认值陷阱](../eloftr-v5-m3fd/SKILL.md)，**单数据源 IR-VIS 数据集必须各自 opt-in `N_SAMPLES_PER_SUBSET` + `SB_SUBSET_SAMPLE_REPLACEMENT=False`**。
 
+> **多卡 DDP 额外坑**：RandomConcatSampler **不**支持 DDP 自动分片（[sampler.py:16-17](../../../src/datasets/sampler.py) 自己声明），且 [data.py](../../../src/lightning/data.py) 的 aligned IR-VIS 短路分支**不调用 `get_local_split`** → 4 张卡各自全集采样，可能重复也可能漂移。详见 [eloftr-server-multigpu §4.3](../eloftr-server-multigpu/SKILL.md)。
+
 ## 4. 候选路径 A-F：哪些已实现 / 哪些留作 v8+
 
 §5 / §6 的诊断结论决定了 v5+ 的方向。按性价比 + 工程量排序：
@@ -82,8 +107,9 @@ RoadScene/M3FD 每个数据集只有一个扁平图像列表，[src/lightning/da
 | **B** | 扩数据（M3FD / LLVIP / KAIST）+ schedule 适配 | **v5 已实现** | [eloftr-v5-m3fd](../eloftr-v5-m3fd/SKILL.md) |
 | **C** | modemb L2 正则（fallback） | 未实现，不推荐先做 | — |
 | **D** | v5 ckpt resume + 慢 LR 精修，专攻 p@1 | **v6 / v6.1 已实现** | [eloftr-v6-finetune](../eloftr-v6-finetune/SKILL.md) |
-| **E** | fine 阶段懂模态（MSBN / FiLM / cosine + modemb） | 未实现，留作 v8+ | — |
-| **F** | 输入端优化（PC 边缘 + CLAHE） | **v7 已实现** | [eloftr-v7-pcclahe](../eloftr-v7-pcclahe/SKILL.md) |
+| **E1** | fine 阶段懂模态 — MSBN | **v8 已实现** | [eloftr-v8-msbn](../eloftr-v8-msbn/SKILL.md) |
+| **E2/E3** | fine 阶段懂模态 — FiLM / cosine + modemb | 未实现，留作 v9+ | — |
+| **F** | 输入端优化（PC 边缘 + CLAHE） | **v7 已实现, 双向 SOTA, 毕设最终交付** | [eloftr-v7-pcclahe](../eloftr-v7-pcclahe/SKILL.md) |
 
 ### 4.A 路径 A：复刻 v2 的"慢 LR + 长 epoch"（未实现）
 
@@ -100,17 +126,19 @@ cfg.TRAINER.EARLY_STOPPING_PATIENCE = 16
 
 预期：fine BN 有 80 × 40 ≈ 3200 次更新（vs REVISION 2 的 640），running stats 应能收敛。如果 p@1px 在 ep 30-50 之间从 ~0.3 缓慢爬到 ~0.7，就实锤了 BN 收敛假设。
 
-### 4.E 路径 E：fine 阶段懂模态（未实现，v8+ 候选）
+### 4.E 路径 E：fine 阶段懂模态（E1 已 v8 实现, E2/E3 留作 v9+）
 
-[eloftr-v2-modemb modemb 信号路径](../eloftr-v2-modemb/SKILL.md) 论证 fine 路径对模态盲是**结构性瓶颈**。如果 v6.1 / v7 跑完 p@1 仍卡在 0.55 附近上不去，下一步必须从架构层突破：
+[eloftr-v2-modemb modemb 信号路径](../eloftr-v2-modemb/SKILL.md) 论证 fine 路径对模态盲是**结构性瓶颈**。3 个候选实现方案:
 
-| 候选 | 实现要点 | 优劣 |
+| 候选 | 实现要点 | 实现状态 |
 |------|---------|------|
-| **E1 MSBN** in `fine_preprocess.layer{1,2}_outconv2[1]` 各复制成 `bn_ir / bn_vis` | 改 `fine_preprocess.py` + `loftr.py:148` 调用处传 modality + ckpt 加载 hook 复制权重到两套 BN | 表达力强 + 兼容 v6/v7 ckpt + 仅 1.5K 新参数 |
-| **E2 FiLM** modemb → 小 MLP → (γ, β) 调制 BN 输出 | 比 MSBN 强（gamma 让 channel 放大），但需要从头训新 MLP | 必须从头训，不能从 ckpt 加载 |
-| **E3 fine_matching cosine + modemb** L2-normalize 把 inner product 变 cosine 让常数偏置不再被 argmax 免疫 | 改 fine_matching 距离度量，所有历史 ckpt 必须重训 | 风险大不推荐 |
+| **E1 MSBN** in `fine_preprocess.layer{1,2}_outconv2[1]` 各复制成 `bn_ir / bn_vis` | 改 `fine_preprocess.py` (Identity 占位法) + `lightning_loftr.py` (`_maybe_inflate_msbn` hook + freeze OR 语义重构 + 4 TB scalar) + ckpt 加载 hook (zero-shift 复制 v7 BN 到 ir/vis 双分支) | **v8 已实现, in-domain SOTA 但 OOD trade-off** [eloftr-v8-msbn](../eloftr-v8-msbn/SKILL.md) |
+| **E2 FiLM** modemb → 小 MLP → (γ, β) 调制 BN 输出 | 比 MSBN 强（gamma 让 channel 放大），但需要从头训新 MLP | 未实现, v9+ 候选 (必须从头训, 不能从 ckpt 加载) |
+| **E3 fine_matching cosine + modemb** L2-normalize 把 inner product 变 cosine 让常数偏置不再被 argmax 免疫 | 改 fine_matching 距离度量，所有历史 ckpt 必须重训 | 未实现, v9+ 候选 (风险大, 重训成本高) |
 
-E1 是 v8 的首选。设计草图见旧版 SKILL git log（保留 4 个文件改动点：`fine_preprocess.py / loftr.py / lightning_loftr freeze 体系扩 FREEZE_FINE_BN_VIS / IR / 自定义 load_state_dict hook`）。
+**E1 (v8) 实测**: in-domain p@1 +10.4% rel (双赢: matches +3.1% 同时 mpe -19.1%) 但 OOD p@1 -4.7% rel (4.34σ 显著退化). 综合 p@3 全程 #1 (1.5194). MSBN 学到 **M3FD 数据集特定的 IR/VIS BN 分布**, 在 RoadScene 上 1px 亚像素精度无法迁移. 详见 [eloftr-v8-msbn §11.5 关键判定](../eloftr-v8-msbn/SKILL.md).
+
+**E1 揭示了路径 F (输入端) 与路径 E (fine 架构) 的边界**: F 学的是模态不变信号 (跨数据集泛化), E 学的是数据集特定模态分化 (in-domain 大涨但 OOD 退). 这是论文 discussion 章节关键 finding.
 
 ### 4.C 路径 C：modemb L2 正则（fallback）
 
@@ -124,23 +152,50 @@ E1 是 v8 的首选。设计草图见旧版 SKILL git log（保留 4 个文件�
 
 §5 v3/v4 实测的指纹（p@1 暴跌 + p@5 反超）已说明 modemb 不是当前主因，所以 modreg 优先级低于路径 A、B。
 
-## 5. 决策树：v7 已收官，下一步 v8 应该做什么
+## 5. 决策树：v7 = 双向 SOTA 毕设交付; v8 = in-domain SOTA 但 OOD trade-off
 
-v7 实测（2026-05-06）：M3FD test p@1 0.4975 / OOD p@1 0.2124 = **双向 SOTA 强成功**，详见 [eloftr-v7-pcclahe §11](../eloftr-v7-pcclahe/SKILL.md)。所以决策树进入 v7 强成功分支：
+v7 实测（2026-05-06）：M3FD test p@1 0.4975 / OOD p@1 0.2124 = **双向 SOTA 强成功**, 详见 [eloftr-v7-pcclahe §11](../eloftr-v7-pcclahe/SKILL.md).
+v8 实测 (2026-05-06): M3FD test p@1 0.5494 / OOD p@1 0.2025 = **in-domain SOTA 但 OOD p@1 退化 -4.7% (4.34σ 显著)**, 不严格满足 plan §6.2 强成功条件 (OOD 不能退过 0.21). 详见 [eloftr-v8-msbn §11-12](../eloftr-v8-msbn/SKILL.md).
 
 ```mermaid
 flowchart TD
-    v7done["v7 ep6 = 双向 SOTA<br/>in-domain +7.2% / OOD +20.5% vs v6.1 ep4"] --> done["v7 ep6 ckpt = 毕设最终交付<br/>(epoch=6-p@1=0.475-p@3=0.855-p@5=0.913.ckpt)"]
-    done --> abopt{"是否做 v7.x 拆分 ablation？"}
-    abopt -->|"时间充裕（+5 GPU h）"| ablation["v7.1 (CLAHE only) / v7.2 (PC only) / v7.3 (+ VIS CLAHE)<br/>拆 A1 vs A2 贡献，论文锦上添花"]
-    abopt -->|"时间紧"| paper["直接写论文用 v7 ep6 数据"]
-    paper --> v8opt{"想冲更高 SOTA？"}
-    ablation --> v8opt
-    v8opt -->|"是 (毕设之外的延伸)"| pathE["v8 = E1 MSBN<br/>fine_preprocess BN 拆 IR/VIS 两套<br/>从 v7 ep6 ckpt 续训"]
-    v8opt -->|"否 (毕设交付)"| stop["毕设答辩用 v7 ep6"]
+    v7done["v7 ep6 = 双向 SOTA<br/>in-domain +7.2% / OOD +20.5% vs v6.1 ep4"] --> v8done["v8 ep16 = in-domain SOTA + OOD trade-off<br/>in-domain +10.4% / OOD -4.7% vs v7 ep6<br/>(OOD p@3/p@5/mpe 仍涨, 仅 1px 退)"]
+    v8done --> shipopt{"毕设最终交付选哪个?"}
+    shipopt -->|"严格按 plan §6.2 (OOD 不退化)"| ship_v7["✅ Ship v7 ep6 final (推荐)<br/>双向 SOTA 叙事更稳<br/>v8 作为 future work / discussion 章节"]
+    shipopt -->|"愿接受 OOD trade-off 换 in-domain 大涨"| ship_v8["Ship v8 ep16 final<br/>需在论文解释 -0.99% abs OOD 退化<br/>综合 p@3 = 1.5194 全程 #1"]
+    ship_v7 --> nextopt{"还想做 ablation 加深论文?"}
+    ship_v8 --> nextopt
+    nextopt -->|"v7 拆分"| v7ablation["v7.1 (CLAHE only) / v7.2 (PC only) / v7.3 (+ VIS CLAHE)<br/>拆 A1 vs A2 贡献"]
+    nextopt -->|"v8 拆分"| v8ablation["v8.1 (FREEZE_FINE_BN_IR=T, 只学 vis)<br/>v8.3 (USE_MSBN from v6.1 ckpt 无 PC+CLAHE)<br/>拆 MSBN 单独贡献 vs MSBN+PC+CLAHE 叠加"]
+    nextopt -->|"否, 毕设答辩"| done["按 ship 决定收官"]
+    v7ablation --> done
+    v8ablation --> done
 ```
 
-> v7 OOD 涨幅 (+20.5%) 是 in-domain 涨幅 (+7.2%) 的 **2.85 倍** = 反 overfit 强证据，证明 PC + CLAHE 学到的是"跨模态 + 跨数据集"模态不变信号 — 这是 v0-v6.1 全程从未出现过的指纹（v5→v6 OOD 跌 4.9%、v6→v6.1 OOD 跌 0.3%；v6.1→v7 OOD 涨 20.5%）。
+### 5.1 三个核心 fingerprint
+
+| 跨版本跳跃 | in-domain p@1 Δ | OOD p@1 Δ | 比例 | 解读 |
+|---|---|---|---|---|
+| v5 → v6 / v6 → v6.1 | +1.7% / +4.8% | -4.9% / -0.3% | 反向 / 微跌 | 典型 in-domain overfit |
+| **v6.1 → v7** | **+7.2%** | **+20.5%** | **+2.85 双向跃迁** | **真模态不变信号** (输入端 PC+CLAHE) |
+| **v7 → v8** | **+10.4%** | **-4.7%** | **-0.45 反向** | **dataset-specific 适应** (fine 架构 MSBN) |
+
+### 5.2 输入端干预 vs fine 架构干预的边界 (论文关键 finding)
+
+- **输入端干预 (路径 F, v7)**: 用经典图像处理先验 (PC + CLAHE) 减小输入分布失配, 学到的模态对齐**跨数据集泛化** → OOD 大涨
+- **fine 架构干预 (路径 E1, v8 MSBN)**: 用双分支 BN 学到 dataset-specific 模态特异性归一化, **in-domain 大涨但 OOD 1px 退化**
+
+**未来工作**: MSBN + 域不变正则 (modemb L2 reg, MSBN 间的 KL 散度约束等) 可能同时获得 in-domain 与 OOD 的双向提升, 留给 v10+ (v9 是 infra 复现, 不引入新方法).
+
+### 5.3 v9 = 服务器复现层（infra 而非新方法）
+
+v9 不引入新算法，目标是把 v8 ep16 = 0.5494/0.9007/0.9464 在 4 卡 3090 服务器上重现一遍：
+
+- **模式 A 单卡复现 (推荐第一步)**: `CUDA_VISIBLE_DEVICES=0`, cfg 完全继承 v8，期望 p@1 ∈ [0.515, 0.525]
+- **模式 B 4 卡 DDP 加速**: 必须改 cfg 反向缩放 LR（§2.1 修复模板），接受 ±0.01 抖动
+- **模式 C 4 卡并行 ablation**: 4 张卡各跑独立单卡 ablation（v9 + v9.1/v9.2/v9.3），1h 跑完矩阵 ★ 最划算
+
+完整决策树 + 必改清单 + 5 个 DDP 隐藏地雷见 [eloftr-server-multigpu](../eloftr-server-multigpu/SKILL.md)。
 
 ## 6. 共同的"加新 v_x"工程惯例
 
@@ -167,3 +222,5 @@ flowchart TD
 | **v6** | `configs/loftr/eloftr_full_v6_finetune.py` | `run_m3fd_v6_finetune.bat` | v5 + `--ckpt_path` v5 ep9 + 慢 LR resume |
 | **v6.1** | `configs/loftr/eloftr_full_v6_1_finetune.py` | `run_m3fd_v6_1_finetune.bat` | v6 零 override + .bat `expandable_segments` + `--ckpt_path` v6 ep6 |
 | **v7（双向 SOTA, 毕设最终交付）** | `configs/loftr/eloftr_full_v7_pcclahe.py` | `run_m3fd_v7_pcclahe.bat` | v6.1 + A1 PC 边缘第二通道 + A2 CLAHE on IR + inflated init α=0；ep6 实测 M3FD test p@1=0.4975 / p@3=0.8672 / p@5=0.9207 / mpe=1.59；OOD test p@1=0.2124 / p@3=0.6085 / p@5=0.7840 / mpe=3.23（详见 [eloftr-v7-pcclahe §11](../eloftr-v7-pcclahe/SKILL.md)） |
+| **v8（in-domain SOTA + OOD trade-off, 探索性结果）** | `configs/loftr/eloftr_full_v8_msbn.py` | `run_m3fd_v8_msbn.bat` (+ `run_v8_compat_test.bat` R8 sanity) | v7 + USE_MSBN=True (fine_preprocess BN 替换 nn.Identity + 新增 _bn_ir/_bn_vis 4 个 BN 共 +768 params) + Identity 占位法保 v0-v7 字节级兼容 + `_maybe_inflate_msbn` ckpt hook (zero-shift 复制 v7 BN -> 双分支) + freeze 体系 OR 语义重构 (5 字段独立 if 平铺) + schedule 修复 v7 死代码 (WARMUP=30/MSLR=[6,11,15]/ES=8) + max_epochs=20；ep16 实测 M3FD test p@1=0.5494 / p@3=0.9007 / p@5=0.9464 / mpe=1.28；OOD test p@1=0.2025 / p@3=0.6187 / p@5=0.7966 / mpe=3.12 (OOD p@1 -4.7% rel 4.34σ 显著退化, 综合 p@3 = 1.5194 全程 #1)（详见 [eloftr-v8-msbn §11-12](../eloftr-v8-msbn/SKILL.md)） |
+| **v9（infra 层：4 卡 3090 服务器复现 v8）** | 继承 `eloftr_full_v8_msbn.py`（模式 A 不动 cfg；模式 B 加 LR 反向缩放 override） | `MyScripts/run_m3fd_v9_msbn{,_debug}.sh`（待生成；模式 A = .bat→.sh 直翻；模式 B 改 cfg；模式 C 4 张卡并行单卡 ablation） | Linux + DDP 多卡运行时 — 不引入新算法；接入 SSH（vlrlab @ 222.20.94.235:8708 / xyjiang）+ Cursor Remote-SSH + .bat→.sh + Win 6 处补丁全部保留（DDP 兼容）+ 5 个 DDP 隐藏地雷诊断（LR 4×/sync_bn × MSBN/RandomConcatSampler 不分片/非确定性/大 batch gap）+ 模式 A 单卡复现验收范围 p@1 ∈ [0.515, 0.525]（详见 [eloftr-server-multigpu](../eloftr-server-multigpu/SKILL.md)） |
