@@ -8,6 +8,6 @@ tmp.*
 */.ipynb_checkpoints/*
 
 logs/
-weights/
-dump/
-data/
+/weights/
+/dump/
+/data/
