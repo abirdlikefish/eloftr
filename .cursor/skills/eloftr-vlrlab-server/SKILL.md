@@ -7,6 +7,8 @@ description: 'VLRLab 4×RTX 3090 服务器（Ubuntu 20.04, CUDA driver 12.8 / nv
 
 > 本 skill 记录毕设期间使用导师 VLRLab 4×RTX 3090 服务器的全套配置与日常工作流。
 > 本地 Windows 单卡兼容补丁见 [eloftr-windows-setup](../eloftr-windows-setup/SKILL.md)（Linux 服务器+多卡上不需要那 6 处补丁）。
+>
+> **★ yurupeng 实际部署的具体路径/身份/边界守卫与本 skill §1, §5, §6, §13 的推荐值不同**——以 [eloftr-yurupeng-workspace](../eloftr-yurupeng-workspace/SKILL.md) §0 差异表为准（仓库根在 `/home/xyjiang/Desktop/yurupeng/eloftr/` 而非 `~/projects/`，agent 身份是 `root` 而非 `xyjiang`，`/data/` 整盘只读而非个人区可写，conda env 名为 `eloftr_yurupeng`，并部署了 `.cursor/hooks/` 三层防越界守卫）。本 skill 余下所有内容（DDP、TensorBoard、tmux、SSH 配置等通用机制）仍然适用。
 
 ## 0. 服务器基本信息
 

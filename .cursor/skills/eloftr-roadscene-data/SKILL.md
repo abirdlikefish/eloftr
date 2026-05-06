@@ -7,6 +7,29 @@ description: Integrate the RoadScene IR-VIS dataset (and any aligned IR-VIS data
 
 > 注：自从引入"对齐 IR-VIS 白名单"机制后，本 skill 描述的 `RoadSceneDataset` 与全套 IR-VIS 监督 / metric / plotting 路径**已经不再只服务 RoadScene 本身**——M3FD（以及未来的 MSRS / LLVIP / TNO）通过 `configs/data/<name>_trainval.py` 复用同一套代码。具体见下方第 2.5 节"对齐 IR-VIS 白名单机制"。新接入数据集时优先看那一节，再回到本 skill 处理 padding / mask / Bug 等通用问题。M3FD 的接入细节单独看 [eloftr-m3fd-data](../eloftr-m3fd-data/SKILL.md)。
 
+## ⚠️ 必读：vlrlab 服务器上 RoadScene 的两份不同来源
+
+服务器（yurupeng 工作区）上 RoadScene 有 **2 份**，命名/结构都不同——选错会导致全部 cfg 字段对不上：
+
+| 来源 | 路径 | 子目录命名 | 用途建议 |
+|---|---|---|---|
+| TarDAL 整理版 | `/data/xyjiang/Datasets/Infrared_image_datasets/TarDAL/roadscene/` | `ir/  vi/  meta/` | **OOD 测试推荐**（结构与 M3FD 同——`ir/vi/`） |
+| 原始 git 仓库 | `/data/xyjiang/Datasets/Infrared_image_datasets/road-scene-infrared-visible-images/` | `cropinfrared/  crop_LR_visible/  crop_HR_visible/  infrared/` | 与本 skill 默认命名兼容 |
+
+两种用法（都需要在仓库内独立维护 `data/index/RoadScene/{train,val,test}_pairs.txt`，因源目录只读）：
+
+```bash
+# 用法 A：软链 TarDAL 整理版（需要在 cfg 里改 ROAD_IR_SUBDIR='ir', ROAD_VIS_SUBDIR='vi'）
+ln -s /data/xyjiang/Datasets/Infrared_image_datasets/TarDAL/roadscene  data/RoadScene
+
+# 用法 B：软链原始 git 版（cfg 用本 skill 默认 cropinfrared/crop_LR_visible，不改）
+ln -s /data/xyjiang/Datasets/Infrared_image_datasets/road-scene-infrared-visible-images  data/RoadScene
+```
+
+权限 `dr-xr-xr-x` 整体只读。PC 缓存 (`*_pc/`) 不能写源目录，需要走仓库内 `data/pc_cache/RoadScene/{Ir_pc,Vis_pc}/`，详见 [eloftr-yurupeng-workspace §5](../eloftr-yurupeng-workspace/SKILL.md)。
+
+服务器边界守卫与完整软链命令见 [eloftr-yurupeng-workspace §4](../eloftr-yurupeng-workspace/SKILL.md)。本 skill 余下所有内容（A3 padding、Homography 监督、Bug A/B、白名单 dispatch）跨平台一致。
+
 ## ⚠️ 必读：HR vs LR 对齐陷阱
 
 `data/RoadScene/` 下有三个图像目录 + 两个可选的 PC 缓存子目录：
