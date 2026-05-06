@@ -8,9 +8,9 @@ tmp.*
 */.ipynb_checkpoints/*
 
 logs/
-weights/
-dump/
-data/
+/weights/
+/dump/
+/data/
 
 # === Cursor agent 自动产物（不入版本库） ===
 .cursor/plans/
