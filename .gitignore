@@ -11,3 +11,9 @@ logs/
 weights/
 dump/
 data/
+
+# === Cursor agent 自动产物（不入版本库） ===
+.cursor/plans/
+.cursor/chat-logs/
+abfNote/chat-logs/
+.cursor/hooks/*.log

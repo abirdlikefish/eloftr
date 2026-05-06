@@ -1,0 +1,43 @@
+---
+description: Workspace boundary and output path policy for the eloftr project on vlrlab server (root身份, 共用账号 xyjiang)
+alwaysApply: true
+---
+
+# 写入边界
+
+- **可写**：`/home/xyjiang/Desktop/yurupeng/` 整个子树
+- **只读软链复用**（仅作软链目标）：
+  - `/data/xyjiang/Datasets/Infrared_image_datasets/TarDAL/{M3FD_Detection,roadscene,tno}/`
+  - `/data/xyjiang/Datasets/`、`/data/xyjiang/Matching/EfficientLoFTR/`（备查）
+- **黑名单**（禁止任何写）：
+  - `/home/xyjiang/{anaconda3,.bashrc,.condarc,.gitconfig,.cursor,.cursor-server,projects}/`
+  - `/data/` 整盘（除上述只读复用外）
+- 触发越界写入需求时，**先用 AskQuestion 显式问用户**，得到许可再做。
+
+# 输出物落位（违反即视为越界）
+
+| 类别 | 路径 |
+|---|---|
+| skill | `.cursor/skills/<name>/SKILL.md` |
+| rule | `.cursor/rules/<name>.mdc` |
+| hook | `.cursor/hooks.json` + `.cursor/hooks/<name>.sh` |
+| plan / todo 阶段总结 | `.cursor/plans/<YYYYMMDD-HHMM>-<slug>.md` |
+| 对话归档 | `.cursor/chat-logs/<uuid>.jsonl`（stop/sessionEnd hook 自动） |
+| 人工备忘 | `abfNote/chat-logs/<YYYYMMDD>.md` |
+| 工程笔记 | `abfNote/<topic>.md` |
+| 训练日志 | `logs/`（仓库内实体目录） |
+| ckpt | `weights/`（仓库内实体目录） |
+| 数据集 | `data/<dataset>/` 软链到只读源 |
+| PC 缓存 | `data/pc_cache/<dataset>/{Ir_pc,Vis_pc}/` |
+
+# 禁令
+
+- 禁止 `sudo` / `su` 二次提权（已是 root）
+- 禁止 `pip install` 到 `base` 或导师 env（先 `conda activate eloftr_yurupeng`）
+- 禁止 `rm -rf` 白名单外路径
+- 禁止 `chown -R` / `chmod -R` 整目录
+- 禁止往 `/data/` 任何子目录写、新建、删除
+- 禁止占满 4 卡：`CUDA_VISIBLE_DEVICES=N[,M]` 限定，运行前 `nvidia-smi` 检查
+- 禁止把 PC-CLAHE 缓存写入只读源目录 `data/M3FD_Detection/Ir_pc/` 等，必须落 `data/pc_cache/<dataset>/`
+
+详见仓库根 `AGENTS.md`。
