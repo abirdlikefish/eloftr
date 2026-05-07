@@ -8,6 +8,7 @@ description: EfficientLoFTR v3 / v4 cross-modal experiments - anti-overfit freez
 > 继承链：v2 (modemb) → **v3 (freeze stack)** → **v4 (REVISION 2)** → v5 (M3FD) → v6 → v7
 > 总览见 [eloftr-cross-modal-experiments](../eloftr-cross-modal-experiments/SKILL.md)
 > v2 见 [eloftr-v2-modemb](../eloftr-v2-modemb/SKILL.md)；v5 起的多数据集见 [eloftr-v5-m3fd](../eloftr-v5-m3fd/SKILL.md)
+> **训练侧 KPI 对照**（v3 P@1=0.31 / v4 P@1=0.37 freeze stack 误激进 → REVISION 2 +21% rel 的实测对照）见 [eloftr-tb-summary](../eloftr-tb-summary/SKILL.md) → [`results/tb_summary.md`](../../../results/tb_summary.md) §2 注 ³ + §5 观察 6。
 
 > **v3 / v4 共一个 skill 的理由**：v4 = v3 的诊断闭环。v3 触发 p@5 反超 v2 + p@1 暴跌的奇怪指纹 → REVISION 2 改成只冻 backbone BN 验证 fine BN 是否是关键 → 实测两个一起读才看得懂归因。
 

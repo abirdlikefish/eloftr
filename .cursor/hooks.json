@@ -1,28 +1,23 @@
 {
   "version": 1,
   "hooks": {
-    "preToolUse": [
-      {
-        "command": ".cursor/hooks/guard-write-scope.sh",
-        "matcher": "^(Write|StrReplace|Delete|EditNotebook)$",
-        "failClosed": true
-      }
-    ],
-    "beforeShellExecution": [
-      {
-        "command": ".cursor/hooks/guard-shell-scope.sh",
-        "failClosed": true
-      }
-    ],
     "stop": [
       {
-        "command": ".cursor/hooks/archive-transcript.sh",
+        "command": "python .cursor/hooks/archive_transcript.py",
+        "failClosed": false
+      },
+      {
+        "command": "python3 .cursor/hooks/archive_transcript.py",
         "failClosed": false
       }
     ],
     "sessionEnd": [
       {
-        "command": ".cursor/hooks/archive-transcript.sh",
+        "command": "python .cursor/hooks/archive_transcript.py",
+        "failClosed": false
+      },
+      {
+        "command": "python3 .cursor/hooks/archive_transcript.py",
         "failClosed": false
       }
     ]

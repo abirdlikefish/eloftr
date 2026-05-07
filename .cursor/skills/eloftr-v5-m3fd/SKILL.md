@@ -9,6 +9,8 @@ description: EfficientLoFTR v5 cross-modal experiment - scale up from RoadScene 
 > 总览见 [eloftr-cross-modal-experiments](../eloftr-cross-modal-experiments/SKILL.md)
 > v4 见 [eloftr-v3-v4-freeze](../eloftr-v3-v4-freeze/SKILL.md)；v6 见 [eloftr-v6-finetune](../eloftr-v6-finetune/SKILL.md)
 > M3FD 数据接入见 [eloftr-m3fd-data](../eloftr-m3fd-data/SKILL.md)
+> **跨版本数字对照**（v5 是 v5..v9 链路第 1 行、综合通用性 baseline）见 [eloftr-results](../eloftr-results/SKILL.md) → [`results/eval_summary.md`](../../../results/eval_summary.md)。注：v5 完整 overall.txt 在历史目录 `dump/m3fd_eval_v5_combined_version0_top1/`，新名 `dump/m3fd_eval_v5_version0_top1/` 仅有部分 PNG。
+> **训练侧 KPI 对照**（v5 wall=3.91h / 9 400 step / best ep9 / modemb learning verdict）见 [eloftr-tb-summary](../eloftr-tb-summary/SKILL.md) → [`results/tb_summary.md`](../../../results/tb_summary.md) §1-§3。
 
 ## 1. 配置（继承 v4 REVISION 2 全部架构）
 

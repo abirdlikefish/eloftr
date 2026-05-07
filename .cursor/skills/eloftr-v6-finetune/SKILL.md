@@ -8,6 +8,8 @@ description: EfficientLoFTR v6 / v6.1 cross-modal experiments - resume from v5 c
 > 继承链：v5 (M3FD) → **v6 (resume + 慢 LR)** → **v6.1 (spillover hotfix)** → v7 (PC + CLAHE)
 > 总览见 [eloftr-cross-modal-experiments](../eloftr-cross-modal-experiments/SKILL.md)
 > v5 见 [eloftr-v5-m3fd](../eloftr-v5-m3fd/SKILL.md)；v7 见 [eloftr-v7-pcclahe](../eloftr-v7-pcclahe/SKILL.md)
+> **跨版本数字对照**（v6 vs v6.1 ckpt 选择、v6/v6.1 共用 v6_1_finetune.py cfg 的脚注）见 [eloftr-results](../eloftr-results/SKILL.md) → [`results/eval_summary.md`](../../../results/eval_summary.md)。
+> **训练侧 KPI 对照**（v6 spillover 中断 wall=2.73h / v6.1 hotfix wall=1.52h / 同 cfg val P@1 +4.1% 的实测）见 [eloftr-tb-summary](../eloftr-tb-summary/SKILL.md) → [`results/tb_summary.md`](../../../results/tb_summary.md) §1 注 ¹ + §5 观察 3。
 
 > **v6 / v6.1 共一个 skill**：v6.1 是 v6 的 spillover hotfix，零 cfg override，schedule 完全继承——两者一起读才能正确归因 expandable_segments。
 

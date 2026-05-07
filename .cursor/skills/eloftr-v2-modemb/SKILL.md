@@ -8,6 +8,7 @@ description: EfficientLoFTR v2 cross-modal experiment - learnable modality embed
 > 继承链：v1 (contrast) → **v2 (modemb)** → v3 → v4 → v5 → v6 → v7
 > 总览见 [eloftr-cross-modal-experiments](../eloftr-cross-modal-experiments/SKILL.md)
 > v1 见 [eloftr-v1-contrast](../eloftr-v1-contrast/SKILL.md)
+> **训练侧 KPI 对照**（v2 RoadScene val P@1=0.74 是 22 张 val 过拟合的指纹、modemb verdict 注释）见 [eloftr-tb-summary](../eloftr-tb-summary/SKILL.md) → [`results/tb_summary.md`](../../../results/tb_summary.md) §2 注 ² + §3 注 ⁵。
 
 ## 配置
 

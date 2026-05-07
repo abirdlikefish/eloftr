@@ -8,6 +8,7 @@ description: EfficientLoFTR v1 cross-modal experiment - symmetric InfoNCE contra
 > 继承链：v0 (baseline) → **v1 (contrast)** → v2 (modemb) → v3 (freeze stack) → v4 (REVISION 2) → v5 (M3FD) → v6 / v6.1 (resume) → v7 (PC + CLAHE)
 > 总览见 [eloftr-cross-modal-experiments](../eloftr-cross-modal-experiments/SKILL.md)
 > 评估见 [eloftr-eval-pipeline](../eloftr-eval-pipeline/SKILL.md)
+> **训练侧 KPI / wall-clock / best val epoch 对照**（v1 是 RoadScene-trained，与 v2..v9 同表对比）见 [eloftr-tb-summary](../eloftr-tb-summary/SKILL.md) → [`results/tb_summary.md`](../../../results/tb_summary.md)。
 
 ## 配置
 

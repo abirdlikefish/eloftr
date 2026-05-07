@@ -7,6 +7,8 @@ description: Evaluate EfficientLoFTR checkpoints (official or finetuned v1..v7, 
 
 > 该 skill 假定数据集已经按 [eloftr-roadscene-data](../eloftr-roadscene-data/SKILL.md) 集成、模型按 [eloftr-cross-modal-experiments](../eloftr-cross-modal-experiments/SKILL.md) 训练完成。
 >
+> **跑出 overall.txt 之后**：把数字追加到 `results/eval_summary.md`，工作流见 [eloftr-results](../eloftr-results/SKILL.md)。本 skill 只管"产生 overall.txt"，**不管"跨版本横向对照"**——后者唯一来源是 [`results/eval_summary.md`](../../../results/eval_summary.md)。
+>
 > 同一份 [MyScripts/eval_roadscene.py](../../../MyScripts/eval_roadscene.py) 既能跑 RoadScene test，也能跑 M3FD test（只是名字保留了历史叫法）。两个 bat wrapper 区分评估集：
 > - [MyScripts/eval_roadscene_finetuned.bat](../../../MyScripts/eval_roadscene_finetuned.bat) → 评估 RoadScene test
 > - [MyScripts/eval_m3fd_finetuned.bat](../../../MyScripts/eval_m3fd_finetuned.bat) → 评估 M3FD test
@@ -87,6 +89,9 @@ v7 cfg 启用 PC 边缘通道（`USE_EDGE_INPUT=True`），dataset 启动时会�
 | `eval_roadscene_official.bat`（官方 ckpt） | **无**（baseline cfg 默认 USE_EDGE_INPUT=False）| — |
 | **`eval_m3fd_finetuned.bat 7`** (v7 in-domain) | **M3FD PC cache** (`data/M3FD_Detection/Ir_pc/`, `Vis_pc/`)| `FileNotFoundError: PC cache directory not found` |
 | **`eval_roadscene_finetuned.bat 7`** (v7 OOD) | **RoadScene PC cache** (`data/RoadScene/cropinfrared_pc/`, `crop_LR_visible_pc/`)| 同上 |
+| **`eval_m3fd_finetuned.bat 8`** (v8 in-domain) | **M3FD PC cache**（v8 cfg 继承 v7 → USE_EDGE_INPUT=True）| 同上 |
+| **`eval_roadscene_finetuned.bat 8`** (v8 OOD) | **RoadScene PC cache** | 同上 |
+| **v9_e2e (in-domain / OOD)** — 用 [v9-e2e SKILL §11.4](../eloftr-v9-e2e/SKILL.md) 直接调 `eval_roadscene.py`，bat 暂未支持 X=9 | **M3FD + RoadScene PC cache 都需**（v9 cfg 自有 USE_EDGE_INPUT=True，含 v7 stack）| 同上 |
 
 ## 4. Bat 脚本
 
@@ -137,6 +142,8 @@ ckpt: <EXP>\version_<Y>\checkpoints\
 | `6` | `m3fd_v6_finetune` | `eloftr_full_v6_finetune.py` |
 | `6_1` (= `6.1`) | `m3fd_v6_1_finetune` | `eloftr_full_v6_1_finetune.py` |
 | `7` | `m3fd_v7_pcclahe` | `eloftr_full_v7_pcclahe.py`（PC + CLAHE input-side; 需要 PC cache 已生成） |
+| `8` | `m3fd_v8_msbn` | `eloftr_full_v8_msbn.py`（v7 stack + MSBN）|
+| **v9_e2e** | `m3fd_v9_e2e_outdoor` | `eloftr_full_v9_e2e.py`（**继承 v0 baseline + 显式 opt-in 全 v1-v8 stack**, 不继承 v8 cfg）— bat 暂未支持 X=9，详见 [eloftr-v9-e2e §11.4](../eloftr-v9-e2e/SKILL.md) 直接调 `eval_roadscene.py` |
 | baseline (官方) | — | `eloftr_full.py`（仅 `eval_roadscene_official.bat` 走这条） |
 
 加载完仍会打印 `missing_keys / unexpected_keys`，理想状态：
@@ -218,4 +225,5 @@ RoadScene 的 IR/VIS 标定本身就有 2-5 px 的对齐残差，因此 `overall
 | `eval_roadscene_finetuned.bat 6` 与 `6_1` 看起来跑了同一个 ckpt | bat 是旧版（没有 sub-version skip filter） | echo header 里 `Experiment` 行应分别是 `m3fd_v6_finetune` 与 `m3fd_v6_1_finetune` |
 | `[WARN] multiple cfgs match eloftr_full_vX_*.py` 触发但选错了 | 同一 X 下有多个 non-subver cfg（比如 `_combined` 和 `_finetune` 都属 v5） | 看 WARN 列出的所有候选，删掉不需要的 cfg，或把脚本里 first-match 的逻辑收紧 |
 | `RuntimeError: size mismatch for backbone.layer0.rbr_dense.conv.weight ((64,1,3,3) vs (64,2,3,3))` 在 eval 时触发 | v7 cfg 强制 backbone in_ch=2，但传入的 ckpt 是 v0-v6.1 的 in_ch=1，且 `eval_roadscene.py` 的 `build_matcher` **不**调用 `_maybe_inflate_stage0` hook（那个 hook 只在训练时 lightning_loftr.py 内部触发）| 用对应的 cfg：v7 ckpt 用 `eval_*finetuned.bat 7`；v0-v6.1 ckpt 用 `eval_*finetuned.bat 1`-`6_1`，绝不用 X=7 + v0-v6.1 ckpt |
-| `FileNotFoundError: PC cache directory not found: data/M3FD_Detection/Ir_pc` 或 `data/RoadScene/cropinfrared_pc` | v7 cfg 启用 `USE_EDGE_INPUT=True`，dataset `__init__` 校验 PC cache 目录存在但找不到 | 跑一次 `MyScripts/precompute_pc_edges.bat`（默认双数据集，~35-40 min），见 §3.1 v7 prerequisite |
+| `FileNotFoundError: PC cache directory not found: data/M3FD_Detection/Ir_pc` 或 `data/RoadScene/cropinfrared_pc` | v7 / v8 / v9 cfg 启用 `USE_EDGE_INPUT=True`，dataset `__init__` 校验 PC cache 目录存在但找不到 | 跑一次 `MyScripts/precompute_pc_edges.bat`（默认双数据集，~35-40 min），见 §3.1 v7 prerequisite |
+| OOD（RoadScene）`total_matches` 数远小于 in-domain（M3FD），如 33K vs 463K (≈14× 差距) | **不是模型问题，是数据集差异 × pair 数差的复合**：14× = 9.5× (210 vs 22 pair) × 1.44× (每对 matches 差)。每对 matches 差距来自 RoadScene 原图低质量 (~500×329 jpg ~22KB) + 道路场景空区多，所有 v 版本（v7/v8/v9）的 in/OOD matches/pair 比例都是 1.41-1.45×，差距 < 3% | **不需要修**，是物理特性。详见 [eloftr-v9-e2e §9 Q2](../eloftr-v9-e2e/SKILL.md)；要进一步排除"模型偏见"嫌疑，对比同 X 在两个数据集 `overall.txt` 的 `total_matches` / pair 数比例，应都在 1.4× 附近 |

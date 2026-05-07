@@ -10,6 +10,8 @@ description: EfficientLoFTR v7 cross-modal experiment - input-side optimization,
 > v6.1 见 [eloftr-v6-finetune](../eloftr-v6-finetune/SKILL.md)
 > 数据集 PC 缓存细节见 [eloftr-m3fd-data](../eloftr-m3fd-data/SKILL.md) 和 [eloftr-roadscene-data](../eloftr-roadscene-data/SKILL.md)
 > 评估侧 v7 兼容性见 [eloftr-eval-pipeline](../eloftr-eval-pipeline/SKILL.md)
+> **跨版本数字对照**（v7 双向 SOTA 在表里以 ★ 标记，与 v8 / v9 横向比较）见 [eloftr-results](../eloftr-results/SKILL.md) → [`results/eval_summary.md`](../../../results/eval_summary.md)。
+> **训练侧 KPI 对照**（v7 wall=2.72h / 9 400 step / best ep6 / modemb 起点继承 v6.1 几乎不动）见 [eloftr-tb-summary](../eloftr-tb-summary/SKILL.md) → [`results/tb_summary.md`](../../../results/tb_summary.md) §1-§3。
 
 **已实现**：[configs/loftr/eloftr_full_v7_pcclahe.py](../../../configs/loftr/eloftr_full_v7_pcclahe.py) + [MyScripts/run_m3fd_v7_pcclahe.bat](../../../MyScripts/run_m3fd_v7_pcclahe.bat) + [MyScripts/run_m3fd_v7_pcclahe_debug.bat](../../../MyScripts/run_m3fd_v7_pcclahe_debug.bat) + [MyScripts/precompute_pc_edges.py](../../../MyScripts/precompute_pc_edges.py)。从 v6.1 ep4 ckpt resume，max_epochs=10。
 

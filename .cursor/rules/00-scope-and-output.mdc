@@ -1,9 +1,11 @@
 ---
-description: Workspace boundary and output path policy for the eloftr project on vlrlab server (root身份, 共用账号 xyjiang)
+description: Workspace boundary and output path policy for the eloftr project. Server side (vlrlab, root, shared account xyjiang) enforces extra blacklist; local Windows side just stays inside the repo root.
 alwaysApply: true
 ---
 
 # 写入边界
+
+## 服务器（Linux, vlrlab, 仓库根 `/home/xyjiang/Desktop/yurupeng/eloftr/`）
 
 - **可写**：`/home/xyjiang/Desktop/yurupeng/` 整个子树
 - **只读软链复用**（仅作软链目标）：
@@ -12,7 +14,15 @@ alwaysApply: true
 - **黑名单**（禁止任何写）：
   - `/home/xyjiang/{anaconda3,.bashrc,.condarc,.gitconfig,.cursor,.cursor-server,projects}/`
   - `/data/` 整盘（除上述只读复用外）
-- 触发越界写入需求时，**先用 AskQuestion 显式问用户**，得到许可再做。
+- **进一步约束**：服务器侧仅 ask mode 工作，不调任何写工具/Shell。详见 `.cursor/rules/01-server-ask-only.mdc`。
+
+## 本地 Windows（仓库根 `c:\Users\abirdlikefish\Desktop\毕设\efficient_loftr\`）
+
+- **可写**：仓库根整树（agent mode 自由开发的主战场）
+- 无 `/data/`、无 `/home/xyjiang/.cursor/` 等 Linux 专属黑名单路径，不会触发误判
+- 推荐工作流：agent 改完 → `git push` → 服务器 `git pull --ff-only` 后跑训练（详见 `abfNote/dev-workflow.md`）
+
+> 触发越界写入需求时，**先用 AskQuestion 显式问用户**，得到许可再做。
 
 # 输出物落位（违反即视为越界）
 
@@ -20,17 +30,17 @@ alwaysApply: true
 |---|---|
 | skill | `.cursor/skills/<name>/SKILL.md` |
 | rule | `.cursor/rules/<name>.mdc` |
-| hook | `.cursor/hooks.json` + `.cursor/hooks/<name>.sh` |
-| plan / todo 阶段总结 | `.cursor/plans/<YYYYMMDD-HHMM>-<slug>.md` |
-| 对话归档 | `.cursor/chat-logs/<uuid>.jsonl`（stop/sessionEnd hook 自动） |
+| hook | `.cursor/hooks.json` + `.cursor/hooks/<name>.{py,sh,bat}`（跨平台优先 `.py`） |
+| plan / todo 阶段总结 | `~/.cursor/plans/<name>_<hash>.plan.md`（Cursor 全局，**不**双写到项目）|
+| 对话归档 | `.cursor/chat-logs/<uuid>.jsonl`（由 `.cursor/hooks/archive_transcript.py` 在 stop/sessionEnd 时自动归档，跨平台、`failClosed:false`） |
 | 人工备忘 | `abfNote/chat-logs/<YYYYMMDD>.md` |
 | 工程笔记 | `abfNote/<topic>.md` |
 | 训练日志 | `logs/`（仓库内实体目录） |
 | ckpt | `weights/`（仓库内实体目录） |
 | 数据集 | `data/<dataset>/` 软链到只读源 |
 | PC 缓存 | `data/pc_cache/<dataset>/{Ir_pc,Vis_pc}/` |
-
-> **plan 双写规则**：`CreatePlan` 工具默认写到 `/home/xyjiang/.cursor/plans/`（§黑名单），后续 hook 拦截 agent 自己 update → 不可维护。agent 调用 `CreatePlan` 后必须**同一回合内**用 `Write` 复刻到 `.cursor/plans/<YYYYMMDD-HHMM>-<slug>.md`，后续仅维护项目内副本。详见 `AGENTS.md` §5.1。
+| 跨版本 eval 汇总 | `results/eval_summary.md`（入版本库；维护规则见 `.cursor/skills/eloftr-results/SKILL.md`） |
+| 跨实验 TB 训练侧汇总 | `results/tb_summary.md`（入版本库；维护规则见 `.cursor/skills/eloftr-tb-summary/SKILL.md`） |
 
 # 禁令
 

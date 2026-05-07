@@ -1,0 +1,48 @@
+# Cross-platform line endings.
+# Without this, .sh files edited on Windows get pushed with CRLF and fail on the
+# Linux server with `'\r': command not found` / `bad interpreter`. Pin LF for
+# anything that runs on the server, CRLF for Windows-only batch files.
+
+* text=auto
+
+# Linux / cross-platform text -> LF
+*.sh        text eol=lf
+*.bash      text eol=lf
+*.py        text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf
+*.json      text eol=lf
+*.md        text eol=lf
+*.mdc       text eol=lf
+*.txt       text eol=lf
+*.cfg       text eol=lf
+*.ini       text eol=lf
+*.toml      text eol=lf
+Dockerfile  text eol=lf
+Makefile    text eol=lf
+
+# Windows-only -> CRLF
+*.bat       text eol=crlf
+*.cmd       text eol=crlf
+*.ps1       text eol=crlf
+
+# Binary (never normalize)
+*.png       binary
+*.jpg       binary
+*.jpeg      binary
+*.gif       binary
+*.bmp       binary
+*.tif       binary
+*.tiff      binary
+*.webp      binary
+*.pth       binary
+*.ckpt      binary
+*.pt        binary
+*.bin       binary
+*.npy       binary
+*.npz       binary
+*.zip       binary
+*.tar       binary
+*.gz        binary
+*.7z        binary
+*.pdf       binary

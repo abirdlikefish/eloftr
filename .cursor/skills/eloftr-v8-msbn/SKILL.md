@@ -9,6 +9,8 @@ description: EfficientLoFTR v8 cross-modal experiment - Modality-Specific BatchN
 > 总览见 [eloftr-cross-modal-experiments](../eloftr-cross-modal-experiments/SKILL.md)
 > v7 见 [eloftr-v7-pcclahe](../eloftr-v7-pcclahe/SKILL.md)
 > v2 fine 模态盲分析见 [eloftr-v2-modemb](../eloftr-v2-modemb/SKILL.md)
+> **跨版本数字对照**（v8 OOD trade-off 在表里以 ⚠️ 标记，v9 已救回）见 [eloftr-results](../eloftr-results/SKILL.md) → [`results/eval_summary.md`](../../../results/eval_summary.md)。本 skill §11 仅保留 v8 内部诊断，跨版本横向对比不重复。
+> **训练侧 KPI 对照**（v8 wall=3.98h / 18 850 step / best ep16 / MSBN drift L1 max=0.088、L2 max=0.139——比 v9 max 小一半，是 v8 OOD trade-off 训练侧机制证据）见 [eloftr-tb-summary](../eloftr-tb-summary/SKILL.md) → [`results/tb_summary.md`](../../../results/tb_summary.md) §3 + §5 观察 4。
 
 **已实现**：[configs/loftr/eloftr_full_v8_msbn.py](../../../configs/loftr/eloftr_full_v8_msbn.py) + [MyScripts/run_m3fd_v8_msbn.bat](../../../MyScripts/run_m3fd_v8_msbn.bat) + [MyScripts/run_m3fd_v8_msbn_debug.bat](../../../MyScripts/run_m3fd_v8_msbn_debug.bat) + [MyScripts/run_v8_compat_test.bat](../../../MyScripts/run_v8_compat_test.bat) + [MyScripts/v8_compat_quickcheck.py](../../../MyScripts/v8_compat_quickcheck.py)。从 v7 ep6 ckpt resume，max_epochs=20。
 

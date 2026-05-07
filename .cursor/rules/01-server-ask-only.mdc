@@ -1,0 +1,55 @@
+---
+description: Server-side guard - on vlrlab Linux server only ask-mode tools are allowed; refuse Write/Shell when working dir starts with /home/xyjiang/Desktop/yurupeng
+alwaysApply: true
+---
+
+# 服务器侧仅 ask mode 工作（软约束）
+
+> 历史背景：旧版 `.cursor/hooks/guard-*.sh` 因平台硬编码 + Linux-only 实现，把本地 Windows 端 agent 锁死，已废弃。守卫职责改为 **agent 自律 + 用户人脑纪律 + 本规则**。
+
+## 一、触发条件（**全部同时满足**才生效）
+
+1. 操作系统是 POSIX（路径形如 `/home/...`，不含 Windows 盘符 `c:\`）
+2. 仓库根绝对路径以 `/home/xyjiang/Desktop/yurupeng` 开头
+
+满足以上两条 → 当前是 vlrlab 服务器环境 → 进入"仅 ask mode"模式。
+
+## 二、触发时 agent 的行为
+
+agent **必须拒绝**调用以下工具：
+
+- `Write` / `StrReplace` / `Delete` / `EditNotebook`（任何写文件）
+- `Shell` / `AwaitShell`（任何执行 shell）
+
+并向用户输出：
+
+> 检测到当前在 vlrlab 服务器（仓库根 `/home/xyjiang/Desktop/yurupeng/...`）。
+> 按工作流约定：服务器侧仅 ask mode（只读 Read/Grep/Glob/SemanticSearch/ReadLints）。
+> 如需改代码请回本地 Windows 操作并 `git push`；服务器只 `git pull --ff-only` + 手动 tmux 跑训练脚本。
+> 详见 `abfNote/dev-workflow.md`。
+
+## 三、不触发时（本地 Windows、其他 Linux 工作机）
+
+本规则**不生效**，agent 正常工作。**无需**在每次 tool call 前重复确认环境，session 第一次写工具调用前判断一次即可。
+
+## 四、自检方式
+
+session 开始时 / 第一次准备调用写工具前，agent 应通过以下任一信号判断环境：
+
+- working directory 路径前缀（`c:\` / `C:\` → Windows，`/home/` → Linux）
+- system_info / user_info 提供的 OS Version 字段
+- `os.name == 'nt'` vs `os.name == 'posix'`（如果调 Python）
+
+判断结果在本 session 内缓存，无需重复询问。
+
+## 五、例外（明示豁免）
+
+如果用户**显式**说"我知道在服务器，但现在就是要 agent 改一下 X 文件"（比如临时修一个 cfg typo），可豁免**本次**调用；豁免后下次同 session 内仍按本规则执行。
+
+豁免的判断标准：用户的 prompt 必须明确包含"服务器"、"vlrlab"、"yurupeng"等环境关键词 + 改写意图，纯说"改一下 X"不构成豁免。
+
+## 六、跟其它 rule / AGENTS.md 的关系
+
+- 本规则是 §AGENTS.md §3-§4 的"服务器侧只读纪律"补丁
+- 黑名单（`/home/xyjiang/anaconda3/`、`/data/` 等）由 AGENTS.md §3 定义；本规则在服务器侧把执行入口直接关掉，等于强化版护栏
+- 本地 Windows 端：本规则不触发，AGENTS.md §3 黑名单天然不存在（`/data/` 路径在 Windows 上不会被命中）
