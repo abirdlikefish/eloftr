@@ -76,9 +76,47 @@ import warnings
 from pathlib import Path
 from typing import List, Optional, Tuple
 
+# ----------------------------------------------------------------------------
+# Force single-threaded numpy / OpenBLAS / MKL / pyfftw / OpenCV PER WORKER.
+# This MUST run BEFORE `import cv2 / numpy / phasepack` below, because those
+# libraries cache their thread counts at import time (OpenBLAS / MKL bake the
+# count from env, OpenCV reads OMP at module init).
+#
+# Why: `mp.Pool` workers each re-import these libs, and each lib defaults to
+# using ALL visible cores. With N workers x M threads-per-worker, the total
+# thread count explodes (24 workers x ~10 BLAS/FFT threads = 240+ threads on
+# an 80-core box), causing context-switch + L1/L2 cache thrashing. Real-world
+# observation on the v10 Megadepth_Syn run: 24 workers gave ~0.112 s/img,
+# with several worker procs showing >200% CPU = obvious oversubscribe.
+#
+# Fix: force each worker to a single thread for ALL math libs, and rely on
+# `mp.Pool(processes=N)` to scale across cores. With single-threaded workers
+# you can safely set --workers up to ~ (cpu_count - 4); plan v10 uses 32.
+#
+# `setdefault` lets the user override from the shell:
+#     OMP_NUM_THREADS=4 python MyScripts/precompute_pc_edges.py ...
+# (rarely needed; only if you switch to fewer workers + want intra-FFT MT).
+#
+# Side-effect on v0-v9 M3FD/RoadScene re-runs: with `--workers 8` the total
+# thread budget drops from 8x~10=80 to 8x1=8 cores, leaving 72 cores idle.
+# Slightly slower per-image but no oversubscribe; if you need to repopulate
+# M3FD/RoadScene PC cache, bump `--workers` to 24 to compensate (still safe).
+for _k in (
+    "OMP_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+    "PYFFTW_NUM_THREADS",
+):
+    os.environ.setdefault(_k, "1")
+
 import cv2
 import numpy as np
 from tqdm import tqdm
+
+# OpenCV ships with its own thread pool (independent of OMP). Lock to 1 too.
+cv2.setNumThreads(1)
 
 # phasepack is an optional dependency; fail loudly with a hint if missing
 # rather than silently falling back to Sobel (would change the published
@@ -180,7 +218,11 @@ def parse_args() -> argparse.Namespace:
                         help="Source image extension (lowercase, e.g. .png / .jpg). "
                              "Output is always written as .png.")
     parser.add_argument("--workers", type=int, default=None,
-                        help="Number of parallel processes. Default min(cpu_count-2, 8). "
+                        help="Number of parallel processes (each is single-threaded "
+                             "thanks to OMP/MKL/cv2 thread limits set at the top of "
+                             "this script). Default min(cpu_count-4, 24). For large "
+                             "datasets (e.g. Megadepth_Syn 258K imgs) recommend 32. "
+                             "For small datasets (M3FD/RoadScene) keep at default. "
                              "Set 1 to debug serially.")
     parser.add_argument("--overwrite", action="store_true",
                         help="Re-compute even if the PC output already exists "
@@ -255,10 +297,14 @@ def _resolve_workers(arg_value: Optional[int]) -> int:
     if arg_value is not None and arg_value >= 1:
         return int(arg_value)
     cpu = os.cpu_count() or 4
-    # cpu_count - 2 leaves 2 cores free for OS / Cursor / shell, capped at 8
-    # because phasecong is FFT-bound and saturates ~6-8 workers; more workers
-    # mainly add memory pressure (each worker holds its own FFT plan).
-    return max(1, min(cpu - 2, 8))
+    # Each worker is single-threaded (see the OMP/MKL setdefault block at the
+    # top of the file), so we can safely scale workers up to ~cpu_count - 4.
+    # Cap at 24 by default to leave headroom on shared servers (vlrlab is
+    # 80-core but used by multiple users); v10 Megadepth_Syn explicitly passes
+    # `--workers 32`. For small datasets (M3FD ~8400 imgs, RoadScene ~440
+    # imgs) the practical cap is much lower because mp.Pool startup + per-task
+    # scheduling overhead starts to dominate around workers == imgs / 200.
+    return max(1, min(cpu - 4, 24))
 
 
 def _stretch_to_uint8(m: np.ndarray) -> np.ndarray:
@@ -414,6 +460,14 @@ def main() -> None:
               f"L3 acceleration enabled")
     if args.recursive:
         print(f"Scan mode: recursive (nested directory structure mirrored to output)")
+    # Confirm thread settings (oversubscribe defence). User can verify
+    # individual worker procs stay near 100% (single-thread) instead of >200%
+    # by running e.g. `top -bn1 | grep python | awk '{print $9}' | sort -rn | head`.
+    print(f"Threads per worker (oversubscribe defence): "
+          f"OMP={os.environ.get('OMP_NUM_THREADS', '?')}, "
+          f"MKL={os.environ.get('MKL_NUM_THREADS', '?')}, "
+          f"OpenBLAS={os.environ.get('OPENBLAS_NUM_THREADS', '?')}, "
+          f"cv2={cv2.getNumThreads()}")
     print(f"Workers: {workers}  |  Overwrite: {args.overwrite}")
 
     grand_t0 = time.time()
