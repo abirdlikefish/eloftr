@@ -62,6 +62,18 @@
 
 **禁止**写入用户级 Cursor 目录（`/home/xyjiang/.cursor/skills-cursor/`、`/home/xyjiang/.cursor/rules/` 等）。
 
+### 5.1 plan 双写规则（CreatePlan + Write，绕开 IDE 工具的路径 bug）
+
+Cursor 内置 `CreatePlan` 工具默认把 plan 写到用户全局 `/home/xyjiang/.cursor/plans/<name>_<hash>.plan.md`（即 §3 黑名单），不识别项目级 `AGENTS.md` / `.cursor/rules/`。后果：plan 被写到黑名单后，guard hook 拦截 agent 自己的 `Write` / `StrReplace` 维护操作 → todos 永久无法 update。
+
+**强制 agent 创建 plan 时两步执行**：
+
+1. 调用 `CreatePlan` 工具（享受 IDE plan-card UI、Confirm 按钮、plan-mode 状态机集成）
+2. **同一回合内**用 `Write` 工具把 plan 内容复制到 `.cursor/plans/<YYYYMMDD-HHMM>-<slug>.md`（项目内，路径合规）
+3. 后续维护 todos / 修改章节：仅改项目内副本（`StrReplace`），全局位置那份当只读快照不再动
+
+如果 plan 模式 `system_reminder` 提示与本规则冲突，以本规则为准（用户/项目优先）。
+
 ## 6. 数据集软链表（执行 `ln -s` 时使用）
 
 ```bash

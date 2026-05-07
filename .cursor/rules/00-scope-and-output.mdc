@@ -30,6 +30,8 @@ alwaysApply: true
 | 数据集 | `data/<dataset>/` 软链到只读源 |
 | PC 缓存 | `data/pc_cache/<dataset>/{Ir_pc,Vis_pc}/` |
 
+> **plan 双写规则**：`CreatePlan` 工具默认写到 `/home/xyjiang/.cursor/plans/`（§黑名单），后续 hook 拦截 agent 自己 update → 不可维护。agent 调用 `CreatePlan` 后必须**同一回合内**用 `Write` 复刻到 `.cursor/plans/<YYYYMMDD-HHMM>-<slug>.md`，后续仅维护项目内副本。详见 `AGENTS.md` §5.1。
+
 # 禁令
 
 - 禁止 `sudo` / `su` 二次提权（已是 root）

@@ -72,13 +72,21 @@ GPU：4× RTX 3090 24GB 共享。Driver 570.153.02 / CUDA driver 12.8 / 系统 n
 │   ├── source_changes_training_windows.md
 │   ├── chat-logs/  (gitignore)                ← 人工对话备忘
 │   └── <topic>.md                             ← 工程笔记
-├── data/                                      ← gitignore（包含软链 + 写入子目录）
-│   ├── M3FD_Detection → /data/xyjiang/Datasets/Infrared_image_datasets/TarDAL/M3FD_Detection  (只读软链)
-│   ├── RoadScene      → /data/xyjiang/Datasets/Infrared_image_datasets/TarDAL/roadscene       (只读软链)
-│   ├── TNO            → /data/xyjiang/Datasets/Infrared_image_datasets/TarDAL/tno             (只读软链)
-│   ├── megadepth/  scannet/                   ← 现有 git 占位（含 .gitignore 子文件）
-│   ├── pc_cache/<dataset>/{Ir_pc,Vis_pc}/     ← v7+ PC 边缘缓存（写入仓库内，**不能写源软链**）
-│   └── index/<dataset>/{train,val,test}_pairs.txt  ← 若源目录无 index/ 时仓库内自建
+├── data/                                      ← gitignore（实体可写目录 + 子目录软链方案，2026-05-06 实施）
+│   ├── M3FD_Detection/                        ← 实体可写目录（仓库内，不是整目录软链）
+│   │   ├── Ir         → /data/xyjiang/Datasets/.../TarDAL/M3FD_Detection/Ir         (子目录软链, 只读)
+│   │   ├── Vis        → /data/xyjiang/Datasets/.../TarDAL/M3FD_Detection/Vis        (子目录软链, 只读)
+│   │   ├── Annotation → /data/xyjiang/Datasets/.../TarDAL/M3FD_Detection/Annotation (子目录软链, 只读)
+│   │   ├── Ir_pc/                              ← 仓库内实体, v7+ PC 缓存写入
+│   │   ├── Vis_pc/                             ← 仓库内实体, v7+ PC 缓存写入
+│   │   └── index/                              ← 仓库内实体, make_m3fd_splits.py 写入
+│   ├── RoadScene/                             ← 实体可写目录（**用 road-scene-infrared-visible-images, 不是 TarDAL/roadscene**，§4 详释）
+│   │   ├── cropinfrared    → /data/xyjiang/Datasets/.../road-scene-infrared-visible-images/cropinfrared    (子目录软链, 只读)
+│   │   ├── crop_LR_visible → /data/xyjiang/Datasets/.../road-scene-infrared-visible-images/crop_LR_visible (子目录软链, 只读)
+│   │   ├── cropinfrared_pc/                    ← 仓库内实体, v7+ PC 缓存
+│   │   ├── crop_LR_visible_pc/                 ← 仓库内实体, v7+ PC 缓存
+│   │   └── index/                              ← 仓库内实体, make_roadscene_splits.py 写入
+│   └── megadepth/  scannet/                   ← 现有 git 占位（含 .gitignore 子文件）
 ├── logs/                                      ← gitignore，仓库内实体（NVMe 跑得快）
 ├── weights/                                   ← gitignore，仓库内实体
 ├── configs/  src/  MyScripts/  notebooks/
@@ -86,7 +94,7 @@ GPU：4× RTX 3090 24GB 共享。Driver 570.153.02 / CUDA driver 12.8 / 系统 n
 └── ...
 ```
 
-**关键约定**：所有训练产物（logs/weights/data/pc_cache/）都落仓库内系统盘，不再走 `/data/xyjiang/yurupeng/` 软链（与 vlrlab-server skill §5 不同）。这是因为：
+**关键约定**：所有训练产物（`logs/`、`weights/`、`data/<dataset>/{Ir_pc,Vis_pc,index}/`）都落仓库内系统盘，不再走 `/data/xyjiang/yurupeng/` 软链（与 vlrlab-server skill §5 不同）。这是因为：
 - 单实验 < 5 GB，5–10 个 ablation 总占用 < 50 GB，系统盘 579 GB 完全够
 - NVMe 速度优势对 dataloader I/O 有边际收益
 - 心智简洁：一个 Desktop/yurupeng/ 子树管所有自己的东西，hook 白名单单一项
@@ -152,83 +160,131 @@ stop / sessionEnd hook 触发，幂等（mtime 比较，不重复 cp）。`.curs
 ```
 /data/xyjiang/Datasets/Infrared_image_datasets/
 ├── TarDAL/
-│   ├── M3FD_Detection/         ← 子目录 Annotation/  Ir/  Vis/  test_generate_file/Vis/
+│   ├── M3FD_Detection/         ← 子目录 Annotation/  Ir/  Vis/  test_generate_file/  (4200 对 PNG, ★ M3FD 用这个)
 │   ├── M3FD_Fusion/            ← Ir/  Vis/（OOD 备用，300 对）
-│   ├── roadscene/              ← ir/  vi/  meta/   ★ skill `eloftr-roadscene-data` 期望布局
+│   ├── roadscene/              ← ir/  vi/  meta/   (★ 仅 41 对 PNG, 与 v0-v8 实测的 220 对不兼容, **不要用作 RoadScene OOD**)
 │   └── tno/                    ← ir/  vi/  meta/   备用 OOD
-├── road-scene-infrared-visible-images/   ← 同名 git 仓库版本（含 crop_HR_visible 等增强变体；与 eloftr 仓库默认 `crop_LR_visible/cropinfrared` 命名不一致，**先不软链**）
+├── road-scene-infrared-visible-images/  ← 子目录 cropinfrared/  crop_LR_visible/  crop_HR_visible/  infrared/  (220 对 JPG, ★ RoadScene 用这个, 命名匹配 cfg 默认)
 ├── LLVIP/  MSRS/  FLIR_ADAS_v2/  Freiburg_Thermal/  VVTUAV_Dataset/   ← 其它跨模态备用
 ```
 
 参考实现：`/data/xyjiang/Matching/EfficientLoFTR/`（导师的 EfficientLoFTR 工程实体，**禁止写**，可读作 cfg 对照）。
 
-### 4.1 必要的软链命令（首次配数据时跑一次）
+### 4.0 ★ RoadScene 两份分发陷阱（2026-05-06 踩过坑）
+
+服务器同时有 TarDAL 整理版与论文官方版，命名 / 文件数 / 后缀全部不同：
+
+| 来源 | 路径 | 子目录命名 | 文件数 | 后缀 | 命名规则 | 与 v0-v8 兼容? |
+|---|---|---|---|---|---|---|
+| TarDAL 整理版 | `TarDAL/roadscene/` | `ir / vi / meta` | 41 对 | `.png` | `001.png` ~ `041.png` | ✗ 数据量太少, 与 v6.1/v7/v8 实测的 OOD test 数据集不同 |
+| **RoadScene 论文官方版** | `road-scene-infrared-visible-images/` | `cropinfrared / crop_LR_visible / crop_HR_visible` | **220 对** | **`.jpg`** | `FLIR_*.jpg` | **✓ 与 cfg 默认值匹配, 与 v0-v8 实测 OOD 数据可比** |
+
+**用 TarDAL/roadscene 的后果**：cfg 默认 `ROAD_IR_SUBDIR='cropinfrared'` 在 TarDAL 那边 dangling；即使改成 `ir`，41 对也不够做 OOD test（v6.1/v7/v8 SOTA 判定基于 22-pair val + 22-pair test，11/11 切分会让 σ 翻倍）。**TarDAL/roadscene 仅适合极快速 sanity，不能做正式 OOD**。
+
+### 4.1 必要的软链命令（首次配数据时跑一次, 子目录软链方案）
+
+`data/<dataset>/` 是**仓库内实体可写目录**（不是整目录软链），里面分两类：图像目录（`Ir/Vis` 或 `cropinfrared/crop_LR_visible`）软链到只读源；预处理 + 索引子目录（`Ir_pc/Vis_pc/index/`）是项目内实体。
 
 ```bash
 cd /home/xyjiang/Desktop/yurupeng/eloftr/data
-ln -s /data/xyjiang/Datasets/Infrared_image_datasets/TarDAL/M3FD_Detection M3FD_Detection
-ln -s /data/xyjiang/Datasets/Infrared_image_datasets/TarDAL/roadscene      RoadScene
-ln -s /data/xyjiang/Datasets/Infrared_image_datasets/TarDAL/tno            TNO
+
+# M3FD: 实体目录 + 3 个子目录软链 + 3 个实体子目录
+mkdir -p M3FD_Detection
+cd M3FD_Detection
+ln -s /data/xyjiang/Datasets/Infrared_image_datasets/TarDAL/M3FD_Detection/Ir          Ir
+ln -s /data/xyjiang/Datasets/Infrared_image_datasets/TarDAL/M3FD_Detection/Vis         Vis
+ln -s /data/xyjiang/Datasets/Infrared_image_datasets/TarDAL/M3FD_Detection/Annotation  Annotation
+mkdir -p Ir_pc Vis_pc index
+cd ..
+
+# RoadScene: 用 road-scene-infrared-visible-images (不是 TarDAL/roadscene!)
+mkdir -p RoadScene
+cd RoadScene
+ln -s /data/xyjiang/Datasets/Infrared_image_datasets/road-scene-infrared-visible-images/cropinfrared      cropinfrared
+ln -s /data/xyjiang/Datasets/Infrared_image_datasets/road-scene-infrared-visible-images/crop_LR_visible   crop_LR_visible
+mkdir -p cropinfrared_pc crop_LR_visible_pc index
+cd ..
+
+# 验证
+ls M3FD_Detection/Ir | head -3                           # 期望: 00000.png 等
+ls RoadScene/cropinfrared | head -3                       # 期望: FLIR_00006.jpg 等
+ls RoadScene/cropinfrared | wc -l                         # 期望: 220
 ```
 
-> hook 不拦 `ln -s`，因为 `ln -s` 写的是 **软链本体**（在仓库内白名单），源是只读复用。
+> hook 不拦 `ln -s`，因为 `ln -s` 写的是软链本体（在仓库内白名单），源是只读复用。
 
-### 4.2 名称差异 → cfg 适配
+> **修错软链**：如果之前按整目录软链方案建过 `data/RoadScene -> TarDAL/roadscene` 类的错软链，用 `ln -sfn <new_target> <link_name>`（symbolic, force, no-dereference）一条命令换目标，不需要先 rm。
 
-[eloftr-roadscene-data](../eloftr-roadscene-data/SKILL.md) skill 期望 `data/RoadScene/{cropinfrared, crop_LR_visible}/`，但 TarDAL 的 `roadscene/` 用的是 `{ir, vi, meta}/`。两种处理：
+### 4.2 为什么走子目录软链而不是 cfg 路径解耦
 
-1. **快速法**：在 `configs/data/roadscene_trainval.py` 里 override：
-   ```python
-   cfg.DATASET.ROAD_IR_SUBDIR  = "ir"   # 不是 cropinfrared
-   cfg.DATASET.ROAD_VIS_SUBDIR = "vi"   # 不是 crop_LR_visible
-   ```
-   并把 `make_roadscene_splits.py` 默认 `--ir_subdir/--vis_subdir/--ext` 同步改。
-2. **保守法**：仍想用 RoadScene 原始的 `cropinfrared/crop_LR_visible/` 命名，就软链到 `road-scene-infrared-visible-images/` 而不是 `TarDAL/roadscene/`，但要确认两份数据是否一致（前者是 git 仓库下载的；后者是 TarDAL 整理后的）。
+历史考虑过两种数据组织方案：
 
-M3FD 的 `Ir/Vis/` 与 [eloftr-m3fd-data](../eloftr-m3fd-data/SKILL.md) skill 期望布局完全一致，**无需 cfg 改动**。
+| 方案 | data/<ds>/ | 代码改动 | 与 windows 兼容 |
+|---|---|---|---|
+| A. 子目录软链（**当前采用**） | 实体可写, 内部 Ir/Vis 软链, Ir_pc/index 实体 | **0 行** | ✓ windows 上 Ir 是实体目录, Linux 上是软链, dataset 类透明 |
+| B. cfg 路径解耦（曾考虑） | 整目录软链到只读源 | 需加 `ROAD_PC_ROOT` cfg 字段, dataset 类 / data.py 各 ~10 行 | ⚠️ R3 三层默认值兜底, 风险大 |
 
-### 4.3 train/val/test 划分文件
+最终选 A：cfg 完全不动（windows 原版的 `cropinfrared/crop_LR_visible/Ir/Vis/Ir_pc/index` 命名直接 work）+ `cv2.imread` 透明跟随软链 + 误写 IR/VIS 源时 OS 直接拒绝（写到只读源会 `EROFS`）+ v0-v8 字节级兼容自动满足。
 
-源软链目录是只读的，**不能在源目录写 `index/`**。需要在仓库内独立维护：
+M3FD 子目录命名 `Ir/Vis` 与 [eloftr-m3fd-data](../eloftr-m3fd-data/SKILL.md) 期望完全一致，无需任何 cfg 改动。RoadScene 子目录命名 `cropinfrared/crop_LR_visible` 与 [eloftr-roadscene-data](../eloftr-roadscene-data/SKILL.md) 期望一致。
+
+### 4.3 train/val/test 划分文件（落仓库内 dataset root 子目录）
+
+`make_m3fd_splits.py` / `make_roadscene_splits.py` 默认参数 `--root data/<ds> --out_subdir index` → 写入 `data/<ds>/index/`，**正好就是子目录软链方案下的实体可写目录**，无需任何 override：
+
+```bash
+cd /home/xyjiang/Desktop/yurupeng/eloftr
+python MyScripts/make_m3fd_splits.py        # 写入 data/M3FD_Detection/index/
+python MyScripts/make_roadscene_splits.py   # 写入 data/RoadScene/index/
+
+wc -l data/M3FD_Detection/index/*.txt        # 期望: 3780 / 210 / 210
+wc -l data/RoadScene/index/*.txt              # 期望: 176 / 22 / 22 (220 张 80/10/10)
+```
+
+> 历史曾考虑 `data/index/<ds>/...` 独立 root，配合"整目录软链"方案。子目录软链方案下不再需要这一层抽象，删除 `--out_root` 等 cli 参数也可以（保留为可选）。
+
+## 5. v7+ PC-CLAHE 缓存路径（子目录软链方案下已无冲突）
+
+`data/<ds>/` 是仓库内实体可写目录（不是整目录软链），所以 `data/<ds>/{Ir_pc,Vis_pc}/` 自然落在项目内可写位置，**与 windows 本地完全一致，cfg / dataset / precompute 脚本零改动**。
 
 ```
-data/index/M3FD/{train,val,test}_pairs.txt        ← 仓库内可写
-data/index/RoadScene/{train,val,test}_pairs.txt   ← 仓库内可写
-```
-
-cfg 里的 `LIST_PATH` 指到仓库内 `data/index/<dataset>/<split>_pairs.txt`，**不要**指到 `data/<dataset>/index/`。如果 split 脚本默认输出位置是 `<dataset>/index/`（例如 `make_m3fd_splits.py`），**必须加 `--index_dir data/index/M3FD` 参数 override**。
-
-## 5. v7+ PC-CLAHE 缓存路径冲突（重要！）
-
-[eloftr-v7-pcclahe](../eloftr-v7-pcclahe/SKILL.md) 与 [eloftr-m3fd-data §5.5](../eloftr-m3fd-data/SKILL.md) 默认假设：
-
-```
-data/M3FD_Detection/Ir_pc/    ← 写入源目录（**只读**，会失败）
+data/M3FD_Detection/Ir_pc/                 ← 仓库内实体, precompute_pc_edges.py 默认输出
 data/M3FD_Detection/Vis_pc/
+data/RoadScene/cropinfrared_pc/            ← 同样
+data/RoadScene/crop_LR_visible_pc/
 ```
 
-**yurupeng 工作区必须改成**：
+`MyScripts/precompute_pc_edges.py` 默认 `ir_out = root / job["ir_pc_subdir"]` 直接落对位置。Linux 入口脚本：
+
+```bash
+bash MyScripts/precompute_pc_edges.sh        # 默认 M3FD + RoadScene 一起算, ~35-50 min
+# 或单独
+python MyScripts/precompute_pc_edges.py --dataset M3FD
+python MyScripts/precompute_pc_edges.py --dataset RoadScene
+```
+
+> AGENTS.md §8 第 1 条遗留 TODO（"PC 缓存输出位置 → `data/pc_cache/<dataset>/`"）在子目录软链方案下作废，可在毕业前 cleanup AGENTS.md 时一并删除。
+
+### 5.1 phasepack 与 pyfftw（速度优化）
+
+`eloftr_yurupeng` env (clone 自 `eloftr_training`) 已装 `phasepack 1.5`（用户手动 `pip install` 过）。但 `pyfftw` 没装，phasepack import 时会 warning：
 
 ```
-data/pc_cache/M3FD/Ir_pc/
-data/pc_cache/M3FD/Vis_pc/
-data/pc_cache/RoadScene/Ir_pc/
-data/pc_cache/RoadScene/Vis_pc/
+UserWarning: Module 'pyfftw' (FFTW Python bindings) could not be imported.
+Falling back on the slower 'fftpack' module for 2D Fourier transforms.
 ```
 
-需要的代码改动（动训练前必做）：
+后果：M3FD 8400 张 PC 预计算从 ~35 min 拖到 ~50 min。可选优化 `pip install pyfftw`（**在 `eloftr_yurupeng` env 里**，不要装到导师 env），但 pyfftw 需要 `libfftw3-dev` 系统库，install 不一定顺利。可跳过。
 
-1. **`MyScripts/precompute_pc_edges.py`**：增加 `--out_dir` 参数，把输出从 `<root>/Ir_pc/` 改到 `data/pc_cache/<dataset>/Ir_pc/`。
-2. **cfg 字段**（`configs/loftr/eloftr_full_v7_pcclahe.py` 与 v8/v9 等）：
-   - 找到 `cfg.DATASET.ROAD_IR_PC_SUBDIR` / `ROAD_VIS_PC_SUBDIR`
-   - 改成绝对路径或仓库相对路径，例如：
-     ```python
-     cfg.DATASET.ROAD_IR_PC_PATH  = "data/pc_cache/M3FD/Ir_pc"   # 不再用 SUBDIR 拼接
-     cfg.DATASET.ROAD_VIS_PC_PATH = "data/pc_cache/M3FD/Vis_pc"
-     ```
-   - 若 cfg 字段约定是 `_SUBDIR`（拼接到 `data/M3FD_Detection/<SUBDIR>/`），需要先改 [src/datasets/roadscene.py](../../../src/datasets/roadscene.py) 让它支持外部路径。
+### 5.2 conda env 实际位置
 
-> 这是 [AGENTS.md §8 工程 TODO](../../../AGENTS.md) 第 1 条遗留事项。动训练前 grep 当前 cfg：`grep -rn "PC_SUBDIR\|Ir_pc\|Vis_pc" configs/ src/ MyScripts/` 看影响面。
+`eloftr_yurupeng` 不在标准 `~/anaconda3/envs/`，而在 `/data/xyjiang/envs/eloftr_yurupeng`（系统盘紧时常见做法）。conda 通过 `envs_dirs` 配置识别，所以：
+
+- `conda activate eloftr_yurupeng`（按名字）✓ work
+- `source /home/xyjiang/anaconda3/bin/activate eloftr_yurupeng` ✓ work（精确路径解析到 `/data/xyjiang/envs/`）
+- Python 版本 3.8.20（不是 3.10），但与 v0-v8 训练栈兼容
+
+`MyScripts/precompute_pc_edges.sh` 第 31 行用的就是后一种 `source ... activate` 写法，已实测可工作。
 
 ## 6. failClosed 自我锁外事故复盘（Cursor hooks 部署的重要教训）
 

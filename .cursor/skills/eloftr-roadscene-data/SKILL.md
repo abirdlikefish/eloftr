@@ -7,28 +7,38 @@ description: Integrate the RoadScene IR-VIS dataset (and any aligned IR-VIS data
 
 > 注：自从引入"对齐 IR-VIS 白名单"机制后，本 skill 描述的 `RoadSceneDataset` 与全套 IR-VIS 监督 / metric / plotting 路径**已经不再只服务 RoadScene 本身**——M3FD（以及未来的 MSRS / LLVIP / TNO）通过 `configs/data/<name>_trainval.py` 复用同一套代码。具体见下方第 2.5 节"对齐 IR-VIS 白名单机制"。新接入数据集时优先看那一节，再回到本 skill 处理 padding / mask / Bug 等通用问题。M3FD 的接入细节单独看 [eloftr-m3fd-data](../eloftr-m3fd-data/SKILL.md)。
 
-## ⚠️ 必读：vlrlab 服务器上 RoadScene 的两份不同来源
+## ⚠️ 必读：vlrlab 服务器上 RoadScene 的两份不同来源（2026-05-06 实测核对）
 
-服务器（yurupeng 工作区）上 RoadScene 有 **2 份**，命名/结构都不同——选错会导致全部 cfg 字段对不上：
+服务器（yurupeng 工作区）上 RoadScene 有 **2 份**，**命名 / 文件数 / 后缀都不同**——选错会导致 cfg 字段对不上、OOD 数据量不足，或与 v0-v8 实测数字不可比：
 
-| 来源 | 路径 | 子目录命名 | 用途建议 |
-|---|---|---|---|
-| TarDAL 整理版 | `/data/xyjiang/Datasets/Infrared_image_datasets/TarDAL/roadscene/` | `ir/  vi/  meta/` | **OOD 测试推荐**（结构与 M3FD 同——`ir/vi/`） |
-| 原始 git 仓库 | `/data/xyjiang/Datasets/Infrared_image_datasets/road-scene-infrared-visible-images/` | `cropinfrared/  crop_LR_visible/  crop_HR_visible/  infrared/` | 与本 skill 默认命名兼容 |
+| 来源 | 路径 | 子目录 | 文件数 | 后缀 | 命名规则 | 与本 skill 默认 cfg 匹配 |
+|---|---|---|---|---|---|---|
+| TarDAL 整理版 | `/data/xyjiang/Datasets/Infrared_image_datasets/TarDAL/roadscene/` | `ir / vi / meta` | **41 对** | `.png` | `001.png` ~ `041.png` | ✗ 命名都不一样 |
+| **RoadScene 论文官方版** | `/data/xyjiang/Datasets/Infrared_image_datasets/road-scene-infrared-visible-images/` | `cropinfrared / crop_LR_visible / crop_HR_visible / infrared / .git` | **220 对** | `.jpg` | `FLIR_*.jpg` | ✓ **完全匹配, 唯一推荐** |
 
-两种用法（都需要在仓库内独立维护 `data/index/RoadScene/{train,val,test}_pairs.txt`，因源目录只读）：
+**结论：必须用 RoadScene 论文官方版 (`road-scene-infrared-visible-images/`)**。理由：
+
+1. **数据量**：v6.1/v7/v8 实测的 OOD test 是 22-pair val + 22-pair test（共 44 对样本评估）；TarDAL 41 对总数已经低于这个工作量级，无法做相同 split；论文版 220 对 80/10/10 = 176/22/22 与 windows 本地实测完全对齐。
+2. **命名**：cfg 默认 `ROAD_IR_SUBDIR='cropinfrared'` / `ROAD_VIS_SUBDIR='crop_LR_visible'` / `--ext .jpg` 与论文版直接匹配；TarDAL 的 `ir/vi/meta + .png` 需要 cfg override + override `make_roadscene_splits.py` 默认参数，risk of 配错。
+3. **统计可比性**：v6.1 ep4 OOD p@1=0.176、v7 ep6 OOD p@1=0.2124、v8 ep16 OOD p@1=0.2025 这些数字基于 220-pair 数据集 + 31,927 matches 的 binomial σ ≈ 0.0023；换 TarDAL 41 对样本量缩 5 倍，σ 翻倍，单次 OOD 比较的统计意义大幅下降，论文叙事不连贯。
+
+**子目录软链方案（推荐, yurupeng-workspace §4.1）**：
 
 ```bash
-# 用法 A：软链 TarDAL 整理版（需要在 cfg 里改 ROAD_IR_SUBDIR='ir', ROAD_VIS_SUBDIR='vi'）
-ln -s /data/xyjiang/Datasets/Infrared_image_datasets/TarDAL/roadscene  data/RoadScene
-
-# 用法 B：软链原始 git 版（cfg 用本 skill 默认 cropinfrared/crop_LR_visible，不改）
-ln -s /data/xyjiang/Datasets/Infrared_image_datasets/road-scene-infrared-visible-images  data/RoadScene
+cd /home/xyjiang/Desktop/yurupeng/eloftr/data
+mkdir -p RoadScene && cd RoadScene
+ln -s /data/xyjiang/Datasets/Infrared_image_datasets/road-scene-infrared-visible-images/cropinfrared      cropinfrared
+ln -s /data/xyjiang/Datasets/Infrared_image_datasets/road-scene-infrared-visible-images/crop_LR_visible   crop_LR_visible
+mkdir -p cropinfrared_pc crop_LR_visible_pc index
+ls cropinfrared/ | wc -l        # 期望: 220
+file cropinfrared/FLIR_00006.jpg   # 期望: JPEG 500x329, 1ch grayscale
 ```
 
-权限 `dr-xr-xr-x` 整体只读。PC 缓存 (`*_pc/`) 不能写源目录，需要走仓库内 `data/pc_cache/RoadScene/{Ir_pc,Vis_pc}/`，详见 [eloftr-yurupeng-workspace §5](../eloftr-yurupeng-workspace/SKILL.md)。
+PC 缓存 (`cropinfrared_pc/` `crop_LR_visible_pc/`) 与 index/ 都是仓库内实体目录，源目录 (`cropinfrared/` `crop_LR_visible/`) 是子目录软链到只读源。详见 [eloftr-yurupeng-workspace §4-§5](../eloftr-yurupeng-workspace/SKILL.md)。
 
-服务器边界守卫与完整软链命令见 [eloftr-yurupeng-workspace §4](../eloftr-yurupeng-workspace/SKILL.md)。本 skill 余下所有内容（A3 padding、Homography 监督、Bug A/B、白名单 dispatch）跨平台一致。
+> **修错软链**：如果之前按 AGENTS.md §6 的整目录软链命令建过 `data/RoadScene -> TarDAL/roadscene` 这种错软链，用 `ln -sfn` 一条命令换目标即可（不需要先 rm）。
+
+本 skill 余下所有内容（A3 padding、Homography 监督、Bug A/B、白名单 dispatch、§6.1 PC 缓存）跨平台一致。
 
 ## ⚠️ 必读：HR vs LR 对齐陷阱
 
@@ -199,7 +209,7 @@ elif mask_w0 != mask_W0:                                                    # �
 
 - `cropinfrared / crop_LR_visible / crop_HR_visible` 三个目录里的文件名集合一致（同一个 RoadScene 帧），所以从 HR 切到 LR **不需要重新生成 `train/val/test_pairs.txt`**。
 - 想换不同的 80/10/10 → 用 [MyScripts/make_roadscene_splits.py](../../../MyScripts/make_roadscene_splits.py)，默认就是 80/10/10、同种子。
-- 生成完一定要 `wc -l data\RoadScene\index\*_pairs.txt` 检查总行数 = 数据集对数（**221 对**，README 上写明）；少了说明哪个目录文件名集合对不上，必须先核对。
+- 生成完一定要 `wc -l data/RoadScene/index/*_pairs.txt` 检查总行数 = 数据集对数。**Windows 本地原版是 221 对**（README 写明），**vlrlab 服务器 git 版是 220 对**（差 1 对系小变体, 与 v0-v8 实测在 σ ≈ 0.0023 内不可分辨）。如果数字差 5 对以上说明哪个目录文件名集合对不上，必须先核对。
 
 ### 数据规模与 BN 收敛瓶颈（重要）
 

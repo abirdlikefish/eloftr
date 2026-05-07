@@ -32,7 +32,7 @@ description: 'Run EfficientLoFTR training and evaluation on Windows + single GPU
 | 3 | [src/lightning/data.py](../../../src/lightning/data.py) `setup()` + `val/test_dataloader()` | `ValueError: Default process group has not been initialized` | 在所有 `dist.get_world_size()` / `DistributedSampler(...)` 前加 `if dist.is_available() and dist.is_initialized():` 守卫，单卡走 `world_size=1, rank=0` 分支。 |
 | 4 | [src/utils/plotting.py](../../../src/utils/plotting.py) `_make_evaluation_figure*` | `RuntimeError: Can't call numpy() on Tensor that requires grad` | 所有 `tensor.cpu().numpy()` 改成 `tensor.detach().cpu().numpy()`，验证阶段被 hook 调用时 tensor 还挂着 autograd 图。 |
 | 5 | [src/lightning/lightning_loftr.py](../../../src/lightning/lightning_loftr.py) `__init__` 加载 ckpt 处 | `_pickle.UnpicklingError: Weights only load failed ...`（**只发生在 `--ckpt_path` 旁路**） | `torch.load(pretrained_ckpt, map_location='cpu', weights_only=False)['state_dict']`。PyTorch 2.6 把 `weights_only` 默认改成了 `True`，但官方 ELoFTR ckpt 含 PL 元数据。 |
-| 6 | [train.py](../../../train.py) 紧跟 `import torch` 之后 | 切换到 `--resume_from_checkpoint` 后再次报 `Weights only load failed ... Unsupported global: pytorch_lightning.callbacks.model_checkpoint.ModelCheckpoint`（PL 内部 `pl_load` 没传 `weights_only=False`） | 全局 monkey-patch `torch.load`：<br/>`_orig_torch_load = torch.load`<br/>`def _torch_load_compat(*a, **kw):`<br/>&nbsp;&nbsp;&nbsp;&nbsp;`kw.setdefault('weights_only', False)`<br/>&nbsp;&nbsp;&nbsp;&nbsp;`return _orig_torch_load(*a, **kw)`<br/>`torch.load = _torch_load_compat`<br/>用 `setdefault` 而不是直接覆盖，保留显式传 `True` 时的语义；只对自己训练 / 官方下载的 ckpt 用，不要拿来加载未知来源的 `.ckpt`。 |
+| 6 | [train.py](../../../train.py) 紧跟 `import torch` 之后 | (a) 切换到 `--resume_from_checkpoint` 后报 `Weights only load failed ... Unsupported global: pytorch_lightning.callbacks.model_checkpoint.ModelCheckpoint`（PL 内部 `pl_load` 没传 `weights_only=False`）<br>(b) **服务器 PyTorch 1.12.1** (eloftr_training/eloftr_yurupeng) 报 `TypeError: 'weights_only' is an invalid keyword argument for Unpickler()`（PyTorch < 1.13 不认这个 kwarg） | 全局 monkey-patch `torch.load`，用 `setdefault` 加 try/except fallback 同时兼容 PyTorch 2.6+ (强制 `weights_only=False`) 和 PyTorch < 1.13 (TypeError 时 pop 重试):<br/><br/>```python<br/>_orig_torch_load = torch.load<br/>def _torch_load_compat(*a, **kw):<br/>    kw.setdefault('weights_only', False)<br/>    try:<br/>        return _orig_torch_load(*a, **kw)<br/>    except TypeError as e:<br/>        if 'weights_only' in str(e):<br/>            kw.pop('weights_only', None)<br/>            return _orig_torch_load(*a, **kw)<br/>        raise<br/>torch.load = _torch_load_compat<br/>```<br/><br/>跨版本 PyTorch 1.10 → 2.6+ 全兼容. 只对自己训练 / 官方下载的 ckpt 用，不要拿来加载未知来源的 `.ckpt`. (try/except fallback 在 2026-05-06 v9 e2e 调试时加, 之前只支持 PyTorch ≥ 1.13) |
 
 ## 3. 还会遇到的 Edge Cases
 
@@ -54,6 +54,20 @@ set PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 把 PyTorch allocator 切到 CUDA Virtual Memory API（虚拟连续段，物理页可不连续），消除碎片可能性。代价：每个 segment 第一次分配多 ~2-3 ms。
 
 完整诊断与 v6.1 实测验证见 [eloftr-v6-finetune §6 v6.1 spillover hotfix](../eloftr-v6-finetune/SKILL.md)。配套操作 SOP：用任务管理器关掉非训练 GPU 应用（Cursor / Edge / Steam / NVIDIA App / 浏览器 WebGL 标签页），从独立 WindowsTerminal 双击 .bat 启动而不要从 Cursor 集成终端启动。
+
+### 3.1.1 PyTorch 版本前提（服务器迁移注意）
+
+`expandable_segments` 是 **PyTorch 2.1+ 引入** 的 CUDA Virtual Memory API 选项。在更老的 PyTorch 上设这个值会直接抛 `RuntimeError: Unrecognized CachingAllocator option: expandable_segments`，CUDA 初始化即崩溃。
+
+| 平台 | PyTorch | 行为 |
+|---|---|---|
+| Windows 本地 | 2.6 | ✓ Cure 是设计意图, 必须保留 |
+| 服务器 `eloftr` (导师 env) | 2.0.0+cu118 | ⚠️ 临界, 实测应该 work 但官方文档说 2.1+ |
+| **服务器 `eloftr_yurupeng`** (clone 自 `eloftr_training`) | **1.12.1** | **❌ RuntimeError 崩溃** |
+
+服务器 24GB VRAM @ bs=4 有 ~9 GB 余量, 与 windows 16GB 紧逼天花板的情形不同, **不需要 cure**。Linux .sh 启动脚本里**不要 set 这个 env**, 让 [train.py:52](../../../train.py) 的 `os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "max_split_size_mb:1024")` 自动兜底。
+
+> 2026-05-06 v9 e2e debug 实测: 沿用 windows .bat 的 `export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` 在 PyTorch 1.12.1 上一启动就崩。新 [MyScripts/run_m3fd_v9_e2e{,_debug}.sh](../../../MyScripts/) 已经删掉这条。
 
 ## 4. 常见症状 → 这里找答案
 

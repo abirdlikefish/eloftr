@@ -37,8 +37,21 @@ _orig_torch_load = torch.load
 
 
 def _torch_load_compat(*args, **kwargs):
+    # PyTorch 2.6+ defaults weights_only=True, breaking PL 1.3.5 ckpts that
+    # pickle ModelCheckpoint callbacks (UnpicklingError "Unsupported global").
+    # Force False to keep PL ckpts loadable.
+    # PyTorch < 1.13 (e.g. server eloftr_training/eloftr_yurupeng with torch
+    # 1.12.1) doesn't accept the weights_only kwarg at all -- raises TypeError
+    # in Unpickler(). We catch it, strip the kwarg, and retry on the original
+    # loader. This keeps the file cross-compatible from PyTorch 1.10 to 2.6+.
     kwargs.setdefault("weights_only", False)
-    return _orig_torch_load(*args, **kwargs)
+    try:
+        return _orig_torch_load(*args, **kwargs)
+    except TypeError as e:
+        if "weights_only" in str(e):
+            kwargs.pop("weights_only", None)
+            return _orig_torch_load(*args, **kwargs)
+        raise
 
 
 torch.load = _torch_load_compat
@@ -49,7 +62,11 @@ np.Inf = np.inf
 loguru_logger = get_rank_zero_only_logger(loguru_logger)
 
 import os
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:1024"
+# Use setdefault so the .sh / .bat caller can pre-set PYTORCH_CUDA_ALLOC_CONF
+# (e.g. expandable_segments:True for the v6.1 spillover cure) before invoking
+# train.py. A hardcoded assignment would silently overwrite the caller's value
+# at every run -- see .cursor/skills/eloftr-server-multigpu/SKILL.md SS2.3.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "max_split_size_mb:1024")
 
 def parse_args():
     # init a costum parser which will be added into pl.Trainer parser

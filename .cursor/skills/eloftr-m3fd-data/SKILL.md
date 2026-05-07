@@ -37,11 +37,9 @@ M3FD_Detection 有两个独立子集，**只用 Detection 那 4200 对训练**�
 > ├── roadscene/        ← ir/  vi/  meta/（**注意 ir/vi 命名与本仓库默认 cropinfrared/crop_LR_visible 不同**）
 > └── tno/              ← ir/  vi/  meta/（备用 OOD）
 > ```
-> 权限 `dr-xr-xr-x` 整体只读。直接软链 `data/M3FD_Detection -> /data/xyjiang/Datasets/Infrared_image_datasets/TarDAL/M3FD_Detection`，**M3FD 子目录 Ir/Vis 命名与本 skill 默认完全一致，无需 cfg 改动**。完整软链命令与服务器边界守卫见 [eloftr-yurupeng-workspace §4](../eloftr-yurupeng-workspace/SKILL.md)。
+> 权限 `dr-xr-xr-x` 整体只读。**采用子目录软链方案**（2026-05-06 决定）：`data/M3FD_Detection/` 是仓库内实体可写目录, 内部 `Ir / Vis / Annotation` 子目录软链到只读源, `Ir_pc / Vis_pc / index` 是项目内实体. **M3FD 子目录 Ir/Vis 命名与本 skill 默认完全一致, 无需 cfg 改动**. 完整软链命令与服务器边界守卫见 [eloftr-yurupeng-workspace §4](../eloftr-yurupeng-workspace/SKILL.md).
 >
-> **★ vlrlab 服务器上 PC 缓存 (`Ir_pc/` `Vis_pc/`) 不能写源目录**（只读）。需要在仓库内独立 `data/pc_cache/M3FD/{Ir_pc,Vis_pc}/`，并改 `precompute_pc_edges.py` 的 `--out_dir` 与 cfg 中的 `ROAD_*_PC_*` 字段。详见 [eloftr-yurupeng-workspace §5](../eloftr-yurupeng-workspace/SKILL.md)。
->
-> **★ vlrlab 服务器上 `index/` 划分文件不能写源目录**。`make_m3fd_splits.py` 必须加 `--index_dir data/index/M3FD` 参数，输出到仓库内 `data/index/M3FD/{train,val,test}_pairs.txt`，cfg 的 `LIST_PATH` 同步指向那里。
+> **★ PC 缓存 (`Ir_pc/` `Vis_pc/`) 与 `index/` 划分文件**在子目录软链方案下都是仓库内实体可写目录, 与 windows 本地行为字节级一致, **cfg / dataset / make_m3fd_splits.py / precompute_pc_edges.py 全部零改动**. 详见 [eloftr-yurupeng-workspace §4.3 + §5](../eloftr-yurupeng-workspace/SKILL.md).
 
 下载解压后期望的目录（与本仓库代码兼容）：
 

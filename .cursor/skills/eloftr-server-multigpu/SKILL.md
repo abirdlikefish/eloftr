@@ -92,24 +92,24 @@ pip install -r requirements.txt
 pip install phasepack       # PC 边缘预计算，v7+ 必装
 ```
 
-### 2.3 ★ PYTORCH_CUDA_ALLOC_CONF 的 order-of-eval 隐藏 bug
+### 2.3 ★ PYTORCH_CUDA_ALLOC_CONF 的 order-of-eval 隐藏 bug — 已修 (2026-05-06)
 
-[train.py:51-52](../../../train.py)：
+[train.py:51-56](../../../train.py) 当前版本：
 
 ```python
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:1024"
+import os
+# Use setdefault so the .sh / .bat caller can pre-set PYTORCH_CUDA_ALLOC_CONF
+# (e.g. expandable_segments:True for the v6.1 spillover cure) before invoking
+# train.py. A hardcoded assignment would silently overwrite the caller's value
+# at every run -- see .cursor/skills/eloftr-server-multigpu/SKILL.md SS2.3.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "max_split_size_mb:1024")
 ```
 
-这行 **强制覆盖** 任何 .bat / .sh 里通过 `set` / `export` 设置的 `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`。换言之：v6.1 / v7 / v8 写在 .bat 里的 spillover cure（[eloftr-v6-finetune §6](../eloftr-v6-finetune/SKILL.md)）**实际上没有生效**——bat 设值 → train.py 启动 → train.py 立刻覆盖。Windows 上"看起来生效"是因为 PyTorch 在第一次 CUDA op 之前才读这个变量，巧合下 .bat 设的值偶尔保留。
+**历史问题**：旧版本是硬赋值 `os.environ[...] = "max_split_size_mb:1024"`，会强制覆盖 .bat / .sh 里通过 `set` / `export` 设置的 `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`。换言之 v6.1 / v7 / v8 写在 .bat 里的 spillover cure（[eloftr-v6-finetune §6](../eloftr-v6-finetune/SKILL.md)）**实际上没有生效**——bat 设值 → train.py 启动 → train.py 立刻覆盖。Windows 上"看起来生效"是因为 PyTorch 在第一次 CUDA op 之前才读这个变量，巧合下 .bat 设的值偶尔保留。
 
-服务器 24GB 比本地 16GB 富裕，spillover 风险大幅降低，但建议同时做两件事：
+**修复后**：`setdefault` 只在 caller 没设时才赋默认值。.sh 里的 `export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` 现在能真正传递到 PyTorch。
 
-1. 修 train.py 第 52 行：
-   ```python
-   os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "max_split_size_mb:1024")
-   ```
-   或直接删除该行。
-2. .sh 启动前 `export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`，作为防御性兜底。
+服务器 24GB 比本地 16GB 富裕 spillover 风险大幅降低，但仍建议 .sh 启动前显式 `export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` 作为防御性兜底（[MyScripts/precompute_pc_edges.sh](../../../MyScripts/precompute_pc_edges.sh) 已采用此模式）。
 
 ## 3. 多卡 ≠ 显存合并：DDP 是 4 个独立 24GB
 
@@ -232,7 +232,27 @@ effective_batch 4 → 16/32 后，模型容易陷入 sharp minima，val precisio
 
 **v8 见顶 ep16 p@1=0.520 是 bs=4 stochastic 噪声搜到的好点**，大 batch 可能直接错过。模式 B 跑出来的 v9 可能见顶提前到 ep10-12 但峰值仅 0.510，**不一定是 bug 而是 Keskar 效应**。
 
-## 5. v9 实操：在 4 卡 3090 服务器复现 v8 ep16
+## 5. v9 实操：在 4 卡 3090 服务器跑 v8 全套架构
+
+### 5.0 决策记录 (2026-05-06): yurupeng 选 e2e cold start 路线 (B3), 不严格复现 v8 ep16
+
+v9 服务器实操有 3 条候选路线 (从严格复现到完全新实验):
+
+| 路线 | 起点 ckpt | cfg / schedule | 期望结果 |
+|---|---|---|---|
+| B1. 严格 v8 复现 | v7 ep6 ckpt (rsync from windows ~192MB) | v8 cfg + max_epochs=20, schedule 不动 | p@1 ∈ [0.515, 0.525] (§5.5 范围) |
+| B2. v8 cfg + outdoor 起点 (不推荐) | `weights/eloftr_outdoor.ckpt` | v8 cfg 不改 | 不可预测, 远差于 v8 (schedule 严重不匹配 cold start) |
+| **B3. e2e cold start (yurupeng 选择)** | `weights/eloftr_outdoor.ckpt` | 新建 `configs/loftr/eloftr_full_v9_e2e.py`: max_epochs=80, WARMUP=300, CANONICAL_LR=2e-3, MSLR=[40,60,75], ES patience=20 | 新实验数据点, 评估"v0-v7 链路是否必须"问题 |
+
+§5.1-§5.5 保留为 B1 (严格复现) 路线模板, 仍可作为 B3 的实操对照. **B3 路线的差异**:
+
+- §5.2 必改清单的 `--ckpt_path` 改为 `weights/eloftr_outdoor.ckpt` (省去 v7 ep6 同步的 rsync)
+- §5.2 `--exp_name` 改为 `m3fd_v9_e2e_outdoor`
+- §5.3 第 4 项 "v7 ep6 ckpt 必需" 取消; 第 1-3 项 (代码/M3FD/PC 缓存) 仍需要
+- §5.4 启动脚本改 `bash MyScripts/run_m3fd_v9_e2e.sh` (新建; 同样在 tmux 内, ~13.3h max_ep=80)
+- §5.5 验收范围**不再对标 v8 0.5494**, 重新设计 (强成功 ≥0.51 / 中成功 [0.45, 0.51] / 弱成功 [0.40, 0.45] / 失败 <0.40, OOD 不退过 0.21)
+
+PC 缓存预计算入口 [MyScripts/precompute_pc_edges.sh](../../../MyScripts/precompute_pc_edges.sh) (Linux 版本, 默认 M3FD + RoadScene 一起算 ~35-50 min) 已在 2026-05-06 落地. 无需 rsync windows 本地的 PC cache, 服务器直接预计算更快 (80 核 CPU). 预计算时如果 phasepack 报 `pyfftw could not be imported` warning, 是 fallback 到 scipy fftpack, 速度 ~30% 损失但不影响正确性. 详见 [eloftr-yurupeng-workspace §5.1](../eloftr-yurupeng-workspace/SKILL.md).
 
 ### 5.1 决策树
 
@@ -251,16 +271,17 @@ flowchart TD
 
 | 项 | 本地 .bat | 服务器 .sh | 备注 |
 |---|---|---|---|
-| 激活 conda | `call "%USERPROFILE%\miniconda3\Scripts\activate.bat" eff_loftr` | `source ~/miniconda3/bin/activate eloftr` | 环境名按 §2.2 |
+| 激活 conda | `call "%USERPROFILE%\miniconda3\Scripts\activate.bat" eff_loftr` | `source /home/xyjiang/anaconda3/bin/activate eloftr_yurupeng` | env 实际在 `/data/xyjiang/envs/eloftr_yurupeng` 但 conda 通过 envs_dirs 识别, source 仍 work |
 | 路径分隔符 | `configs\loftr\...` | `configs/loftr/...` | 续行 `^` → `\` |
 | 环境变量 | `set X=Y` | `export X=Y` | |
 | 末尾 | `pause` | 删掉 | |
-| `--ckpt_path` | `logs\tb_logs\m3fd_v7_pcclahe\version_0\checkpoints\epoch=6-...ckpt` | 同名相对路径，**等号需引号**：`--ckpt_path='logs/.../epoch=6-....ckpt'` | v7 ep6 ckpt 必须传到服务器同位置 |
+| `--ckpt_path` (B1) | `logs\tb_logs\m3fd_v7_pcclahe\...epoch=6-...ckpt` | 同名相对路径，**等号需引号**：`--ckpt_path='logs/.../epoch=6-....ckpt'` | v7 ep6 ckpt 必须传到服务器同位置 |
+| `--ckpt_path` (B3) | — | `--ckpt_path=weights/eloftr_outdoor.ckpt` | e2e cold start, 不需要 rsync v7 ep6 |
 | `--gpus` | `1` | `1`（模式 A） | 模式 B/C 见 §3.2 |
 | `--num_workers` | `6` | `8` | 服务器 CPU 核多 |
 | `--pin_memory` | `false`（本地内存紧） | `true` | 服务器内存充足，DataLoader→GPU 拷贝更快 |
-| `PYTORCH_CUDA_ALLOC_CONF` | `expandable_segments:True`（被 train.py 覆盖，§2.3） | 同 + 顺手修 [train.py:52](../../../train.py) `setdefault` | |
-| `--exp_name` | `m3fd_v8_msbn` | `m3fd_v9_msbn_repro` | 不要混进 v8 的 tb_logs |
+| `PYTORCH_CUDA_ALLOC_CONF` | `expandable_segments:True`（被 train.py 覆盖，§2.3） | 同；[train.py:52](../../../train.py) 已修为 `setdefault` (2026-05-06) | |
+| `--exp_name` | `m3fd_v8_msbn` | B1: `m3fd_v9_msbn_repro` / B3: `m3fd_v9_e2e_outdoor` | 不要混进 v8 的 tb_logs |
 
 ### 5.3 数据 / ckpt 同步
 
