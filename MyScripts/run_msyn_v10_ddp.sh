@@ -8,7 +8,7 @@
 #
 # Usage:
 #   bash MyScripts/run_msyn_v10_ddp.sh
-#   (must be inside tmux: tmux new -s msyn_v10_b; expected wall-clock ~3-4h)
+#   (must be inside tmux: tmux new -s msyn_v10_b; expected wall-clock ~4-5h)
 #
 # Prerequisites in addition to mode A:
 #   - All 4 GPUs free (check `nvidia-smi`); CUDA_VISIBLE_DEVICES=0,1,2,3 below
@@ -16,15 +16,15 @@
 #     (4x sample size for MSBN dual BN convergence; accept v9 byte-mismatch)
 #
 # Schedule (see configs/loftr/eloftr_full_v10_msyn_ddp.py for details):
-#   max_epochs=10, ES patience=3, MSLR=[2,4,6]
+#   max_epochs=12, ES patience=3, MSLR=[3,5,7], MSLR_GAMMA=0.5
 #   bs=4 x 4 GPU = effective_bs=16 -> _scaling=0.25
 #   CANONICAL_LR=5e-4 -> TRUE_LR=1.25e-4 (matches v9 single-card)
-#   WARMUP_STEP=0 -> actual 0 step (skip warmup entirely)
-#   N_SAMPLES_PER_SUBSET=29000 (4 rank * 29K ~= 115K train full set)
+#   WARMUP_STEP=450 -> actual 1800 step (~0.25 ep, defensive ramp from cold start)
+#   N_SAMPLES_PER_SUBSET=28750 (4 rank * 28750 = 115K train full set, no overlap)
 #
-# Sanity gates (same 6 as mode A; gate 6 prints WARMUP_STEP=0 here):
+# Sanity gates (same 6 as mode A; gate 6 prints scaled WARMUP=1800 here):
 #   1-5 same as mode A
-#   6. "TRUE_LR=1.25e-04, WARMUP_STEP=0" (cfg 0 / 0.25 = 0)
+#   6. "TRUE_LR=1.25e-04, WARMUP_STEP=1800" (cfg 450 / 0.25 = 1800)
 #
 # DDP-specific debug checks (do these in mode B debug pass):
 #   a. grep "[rank " logs/.../version_0/version_0.log -- expect 4 rank entries
@@ -36,9 +36,9 @@
 #   c. TB train_loss step 0 should be ~1.4-1.6 (same as v9 ep0)
 #
 # Acceptance (v10 ship; 4-card non-determinism allows +/- 0.005):
-#   strong : in-domain test p@1 >= 0.60, peak ep 4-7, wall-clock <= 4h
-#   medium : in-domain test p@1 in [0.50, 0.60], peak ep 4-8, <= 5h
-#   weak   : in-domain test p@1 in [0.40, 0.50], peak ep 4-9, <= 6h
+#   strong : in-domain test p@1 >= 0.60, peak ep 2-7,  wall-clock <= 5h
+#   medium : in-domain test p@1 in [0.50, 0.60], peak ep 2-9, <= 6h
+#   weak   : in-domain test p@1 in [0.40, 0.50], peak ep 2-11, <= 7h
 #   fail   : in-domain test p@1 < 0.40 or any DDP gate fails
 # ============================================================================
 set -euo pipefail
@@ -83,6 +83,6 @@ python train.py \
   --limit_train_batches=1.0 \
   --limit_val_batches=1.0 \
   --num_sanity_val_steps=0 \
-  --max_epochs=10 \
+  --max_epochs=12 \
   --disable_mp \
   --thr 0.1

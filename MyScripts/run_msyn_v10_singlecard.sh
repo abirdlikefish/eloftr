@@ -12,8 +12,8 @@
 #    for full 10ep, but we typically only run debug here)
 #
 # Schedule (see configs/loftr/eloftr_full_v10_msyn_singlecard.py for details):
-#   max_epochs=10, ES patience=3, MSLR=[2,4,6]
-#   bs=4 single GPU -> TRUE_LR=1.25e-4, WARMUP=32 step (~0.001 ep)
+#   max_epochs=12, ES patience=3, MSLR=[3,5,7], MSLR_GAMMA=0.5
+#   bs=4 single GPU -> TRUE_LR=1.25e-4, WARMUP=28800 step (~1 ep, matches v9 ratio)
 #
 # Sanity gates to watch in startup log (~30 lines, see plan SS6.1):
 #   1. "Inflated stage0 conv weights: 1ch -> 2ch (alpha=0.0, ...)"
@@ -22,12 +22,12 @@
 #   4. PL model summary: fine_preprocess.*_bn_ir/vis.weight shape [128]/[256]
 #   5. "RoadSceneDataset: CLAHE enabled (clipLimit=2.0, ..., ir=True, vis=False)"
 #      x2 (train + val each instantiate dataset once)
-#   6. "TRUE_LR=1.25e-04, WARMUP_STEP=32" (cfg 2 / 0.0625 scaling)
+#   6. "TRUE_LR=1.25e-04, WARMUP_STEP=28800" (cfg 1800 / 0.0625 scaling)
 #
 # Acceptance (cold start; vs v9 M3FD ep75 0.6863 only as rough reference):
-#   strong : peak ep 4-7,  val p@1 >= 0.60
-#   medium : peak ep 4-8,  val p@1 in [0.50, 0.60]
-#   weak   : peak ep 4-9,  val p@1 in [0.40, 0.50]
+#   strong : peak ep 2-7,  val p@1 >= 0.60
+#   medium : peak ep 2-9,  val p@1 in [0.50, 0.60]
+#   weak   : peak ep 2-11, val p@1 in [0.40, 0.50]
 #   fail   : val p@1 < 0.40
 # ============================================================================
 set -euo pipefail
@@ -78,6 +78,6 @@ python train.py \
   --limit_train_batches=1.0 \
   --limit_val_batches=1.0 \
   --num_sanity_val_steps=0 \
-  --max_epochs=10 \
+  --max_epochs=12 \
   --disable_mp \
   --thr 0.1

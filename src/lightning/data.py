@@ -248,6 +248,31 @@ class MultiSceneDataModule(pl.LightningDataModule):
         # is a one-line change to ``ALIGNED_IRVIS_SOURCES``.
         data_source = self.trainval_data_source if mode in ['train', 'val'] else self.test_data_source
         if is_aligned_irvis(data_source):
+            # DDP image-level pre-sharding (mirrors the scene-level
+            # get_local_split call below for ScanNet/MegaDepth, see L283).
+            # Without this, every rank loads the full index file and
+            # RandomConcatSampler -- which intentionally is NOT DDP-aware
+            # (sampler.py L16-17: "It assumes the dataset is splitted across
+            # ranks instead of replicated") -- gives all ranks identical
+            # batches because they all torch.manual_seed(cfg.TRAINER.SEED) on
+            # the same global generator. v0-v9 ran single-card so this design
+            # gap never surfaced; v10 mode B 4-card DDP is the first time it
+            # matters.
+            #
+            # Pre-shard at TRAIN time only; val/test stay full because their
+            # dataloaders wrap with PyTorch's standard DistributedSampler
+            # (val_dataloader L412-413, test_dataloader L429-430).
+            with open(scene_list_path, 'r', encoding='utf-8') as f:
+                all_names = [line.strip() for line in f.readlines() if line.strip()]
+            if mode == 'train' and self.world_size > 1:
+                local_names = list(get_local_split(
+                    all_names, self.world_size, self.rank, self.seed))
+                logger.info(
+                    f'[rank {self.rank}]: aligned IR-VIS train pre-shard: '
+                    f'{len(local_names)}/{len(all_names)} samples '
+                    f'(disjoint across {self.world_size} ranks; seed={self.seed})')
+            else:
+                local_names = all_names
             logger.info(f'[rank {self.rank}]: building RoadSceneDataset (dataset_name={data_source}) from {scene_list_path}')
             ds = RoadSceneDataset(
                 root_dir=data_root,
@@ -265,6 +290,7 @@ class MultiSceneDataModule(pl.LightningDataModule):
                 homography_kwargs=self.road_homography_kwargs,
                 augment_fn=(self.augment_fn if mode == 'train' else None),
                 fp16=self.fp16,
+                names=local_names,  # DDP pre-shard hand-off (None-equivalent in single-card)
                 # v7_pcclahe (defaults to all-off so v0-v6.1 cfg is byte-identical)
                 use_edge_input=self.use_edge_input,
                 ir_pc_subdir=self.road_ir_pc_subdir,

@@ -79,13 +79,29 @@ def _resize_keep_aspect(img: np.ndarray, long_edge: int, df: int) -> Tuple[np.nd
     Returns ``(resized_img, new_h, new_w)``.
     """
     h, w = img.shape
+    new_h, new_w = _resize_target_shape(img.shape, long_edge, df)
+    img_resized = cv2.resize(img, (new_w, new_h))
+    return img_resized, new_h, new_w
+
+
+def _resize_target_shape(raw_shape: Tuple[int, int], long_edge: int, df: int) -> Tuple[int, int]:
+    """Pure-math version of ``_resize_keep_aspect`` -- returns the (new_h, new_w)
+    that ``_resize_keep_aspect(raw, long_edge, df)`` would produce, without
+    actually allocating / copying pixels.
+
+    Used by the v10 PC cache shape check in ``RoadSceneDataset.__getitem__``
+    so we can verify that cache and raw both round to the SAME df-aligned
+    target after the dataset's resize step. Also re-used by
+    ``MyScripts/fix_pc_cache_alignment.py`` to compute the post-resize
+    shape that PC caches must be pre-aligned to.
+    """
+    h, w = raw_shape
     scale = float(long_edge) / max(h, w)
     new_h = int(round(h * scale))
     new_w = int(round(w * scale))
     new_h = max(df, (new_h // df) * df)
     new_w = max(df, (new_w // df) * df)
-    img_resized = cv2.resize(img, (new_w, new_h))
-    return img_resized, new_h, new_w
+    return (new_h, new_w)
 
 
 def _random_homography(h: int, w: int,
@@ -197,6 +213,13 @@ class RoadSceneDataset(utils_data.Dataset):
                  use_clahe_vis: bool = False,
                  clahe_clip_limit: float = 2.0,
                  clahe_tile_size=(8, 8),
+                 # DDP pre-shard hand-off: when set, skip _read_index_file and
+                 # use the provided pre-sharded list instead. data.py L283
+                 # (ScanNet/MegaDepth) shards npz scenes via get_local_split;
+                 # the IR-VIS short-circuit branch in data.py mirrors that by
+                 # sharding `names` here. Default None preserves v0-v9 byte-
+                 # identical behaviour: read the full index from list_path.
+                 names: Optional[List[str]] = None,
                  **kwargs):
         super().__init__()
         if mode not in ("train", "val", "test"):
@@ -276,9 +299,18 @@ class RoadSceneDataset(utils_data.Dataset):
                 f"RoadSceneDataset: CLAHE enabled (clipLimit={self.clahe_clip_limit}, "
                 f"tile={self.clahe_tile_size}, ir={self.use_clahe_ir}, vis={self.use_clahe_vis})")
 
-        self.names = _read_index_file(list_path)
+        # Index source priority:
+        #   1. `names` kwarg (DDP pre-sharded sub-list from data.py) -- bypasses
+        #      file IO so each rank only iterates its 1/world_size shard
+        #   2. `list_path` (default v0-v9 path) -- reads the full index file
+        if names is not None:
+            self.names = list(names)
+        else:
+            self.names = _read_index_file(list_path)
         if not self.names:
-            raise RuntimeError(f"Empty RoadScene index: {list_path}")
+            raise RuntimeError(
+                f"Empty RoadScene index: list_path={list_path}, "
+                f"names={None if names is None else f'<pre-sharded list, len=0>'}")
 
     def __len__(self) -> int:
         return len(self.names)
@@ -334,30 +366,42 @@ class RoadSceneDataset(utils_data.Dataset):
                     f"Run MyScripts/precompute_pc_edges.bat to (re)generate.")
             if vis_pc_raw is None:
                 raise FileNotFoundError(f"Failed to read VIS PC cache: {vis_pc_path}.")
-            # Sanity: PC cache must share aspect ratio with the source image,
-            # otherwise the synced resize below would silently misalign.
+            # Sanity: cache and raw must produce the SAME df-aligned target
+            # shape under _resize_keep_aspect(., img_resize, df). Downstream
+            # L383 `cv2.resize(ir_pc_raw, (w0_r, h0_r))` will force cache to
+            # raw's target; if the implied caches' own target differs, the
+            # cv2.resize introduces a non-uniform stretch -- which is fine for
+            # SHAPE alignment (np.stack succeeds because cache lands at raw
+            # target shape regardless), but produces subtle pixel
+            # mis-correspondence vs. the cleaner "cache already at training
+            # resolution" path. So we require strict target-shape equality.
             #
-            # v0-v9 (M3FD/RoadScene): cache and source are precomputed at the
-            # same resolution -> aspect ratio difference is exactly 0, passes.
-            # v10 (Megadepth_Syn) + L3 optimization: cache is precomputed at
-            # max_long_edge=640 while source is up to 1600 long edge, so we
-            # only require aspect ratios to match (within 1% tolerance to absorb
-            # cv2.resize df-rounding rounding noise). Downstream
-            # `cv2.resize(ir_pc_raw, (w0_r, h0_r))` works as long as ratios match.
-            def _aspect(s):
-                # s = (H, W); avoid div by zero on 1xN edge case
-                return s[0] / max(s[1], 1)
-            _tol = 0.01
-            if abs(_aspect(ir_pc_raw.shape) - _aspect(ir_raw.shape)) > _tol:
+            # Compatibility:
+            # - v0-v9 (M3FD/RoadScene): cache and raw are precomputed at the
+            #   same resolution -> _target_shape returns identical values, passes.
+            # - v10 (Megadepth_Syn) after MyScripts/fix_pc_cache_alignment.py:
+            #   cache is pre-resized to dataset target -> trivially passes.
+            # - v10 raw cache (no fix script run): caches at max_long_edge=640
+            #   may round to different df-aligned target than raw at
+            #   img_resize=480 (depends on raw aspect, see plan SS3.1) ->
+            #   raises here; user needs to run fix script first.
+            target_raw_ir = _resize_target_shape(ir_raw.shape, self.img_resize, self.df)
+            target_pc_ir = _resize_target_shape(ir_pc_raw.shape, self.img_resize, self.df)
+            if target_raw_ir != target_pc_ir:
                 raise RuntimeError(
-                    f"IR PC cache aspect ratio {_aspect(ir_pc_raw.shape):.4f} (shape {ir_pc_raw.shape}) "
-                    f"!= raw IR aspect ratio {_aspect(ir_raw.shape):.4f} (shape {ir_raw.shape}) "
-                    f"for {name}. Re-run precompute (cache and source must share aspect ratio).")
-            if abs(_aspect(vis_pc_raw.shape) - _aspect(vis_raw.shape)) > _tol:
+                    f"IR PC cache shape {ir_pc_raw.shape} resizes to {target_pc_ir} but "
+                    f"raw IR shape {ir_raw.shape} resizes to {target_raw_ir} (img_resize="
+                    f"{self.img_resize}, df={self.df}) for {name}. "
+                    f"Run MyScripts/fix_pc_cache_alignment.py to pre-align cache to raw target, "
+                    f"OR re-run precompute_pc_edges.py with --max_long_edge={self.img_resize} "
+                    f"to produce caches directly at training resolution.")
+            target_raw_vis = _resize_target_shape(vis_raw.shape, self.img_resize, self.df)
+            target_pc_vis = _resize_target_shape(vis_pc_raw.shape, self.img_resize, self.df)
+            if target_raw_vis != target_pc_vis:
                 raise RuntimeError(
-                    f"VIS PC cache aspect ratio {_aspect(vis_pc_raw.shape):.4f} (shape {vis_pc_raw.shape}) "
-                    f"!= raw VIS aspect ratio {_aspect(vis_raw.shape):.4f} (shape {vis_raw.shape}) "
-                    f"for {name}. Re-run precompute.")
+                    f"VIS PC cache shape {vis_pc_raw.shape} resizes to {target_pc_vis} but "
+                    f"raw VIS shape {vis_raw.shape} resizes to {target_raw_vis} for {name}. "
+                    f"Run MyScripts/fix_pc_cache_alignment.py first.")
 
         # 1. Resize each image independently (long edge = img_resize, df-aligned).
         ir, h0_r, w0_r = _resize_keep_aspect(ir_raw, self.img_resize, self.df)
