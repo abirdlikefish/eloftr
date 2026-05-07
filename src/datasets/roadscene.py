@@ -334,16 +334,30 @@ class RoadSceneDataset(utils_data.Dataset):
                     f"Run MyScripts/precompute_pc_edges.bat to (re)generate.")
             if vis_pc_raw is None:
                 raise FileNotFoundError(f"Failed to read VIS PC cache: {vis_pc_path}.")
-            # Sanity: PC cache must match the source resolution exactly,
+            # Sanity: PC cache must share aspect ratio with the source image,
             # otherwise the synced resize below would silently misalign.
-            if ir_pc_raw.shape != ir_raw.shape:
+            #
+            # v0-v9 (M3FD/RoadScene): cache and source are precomputed at the
+            # same resolution -> aspect ratio difference is exactly 0, passes.
+            # v10 (Megadepth_Syn) + L3 optimization: cache is precomputed at
+            # max_long_edge=640 while source is up to 1600 long edge, so we
+            # only require aspect ratios to match (within 1% tolerance to absorb
+            # cv2.resize df-rounding rounding noise). Downstream
+            # `cv2.resize(ir_pc_raw, (w0_r, h0_r))` works as long as ratios match.
+            def _aspect(s):
+                # s = (H, W); avoid div by zero on 1xN edge case
+                return s[0] / max(s[1], 1)
+            _tol = 0.01
+            if abs(_aspect(ir_pc_raw.shape) - _aspect(ir_raw.shape)) > _tol:
                 raise RuntimeError(
-                    f"IR PC cache shape {ir_pc_raw.shape} != raw IR shape "
-                    f"{ir_raw.shape} for {name}. Re-run precompute.")
-            if vis_pc_raw.shape != vis_raw.shape:
+                    f"IR PC cache aspect ratio {_aspect(ir_pc_raw.shape):.4f} (shape {ir_pc_raw.shape}) "
+                    f"!= raw IR aspect ratio {_aspect(ir_raw.shape):.4f} (shape {ir_raw.shape}) "
+                    f"for {name}. Re-run precompute (cache and source must share aspect ratio).")
+            if abs(_aspect(vis_pc_raw.shape) - _aspect(vis_raw.shape)) > _tol:
                 raise RuntimeError(
-                    f"VIS PC cache shape {vis_pc_raw.shape} != raw VIS shape "
-                    f"{vis_raw.shape} for {name}. Re-run precompute.")
+                    f"VIS PC cache aspect ratio {_aspect(vis_pc_raw.shape):.4f} (shape {vis_pc_raw.shape}) "
+                    f"!= raw VIS aspect ratio {_aspect(vis_raw.shape):.4f} (shape {vis_raw.shape}) "
+                    f"for {name}. Re-run precompute.")
 
         # 1. Resize each image independently (long edge = img_resize, df-aligned).
         ir, h0_r, w0_r = _resize_keep_aspect(ir_raw, self.img_resize, self.df)

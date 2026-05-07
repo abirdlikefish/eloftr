@@ -121,12 +121,30 @@ DATASET_SHORTCUTS = {
         vis_pc_subdir="crop_LR_visible_pc",
         ext=".jpg",
     ),
+    # v10 Megadepth_Syn (scene-disjoint 175/10/10 train-only). M3FD-style
+    # source/_pc peer-level layout: train/{infrared, infrared_pc, phoenix,
+    # phoenix_pc} all share the deep MegaDepth_v1 nested structure
+    # (S6/zl548/MegaDepth_v1/<scene>/<denseN>/imgs/<stem>). Source dirs are
+    # symlinks into /data/.../train/{infrared,phoenix}; _pc dirs are real
+    # repo-internal directories where this script writes PC PNGs (mirroring
+    # nested structure thanks to --recursive). Use --recursive +
+    # --max_long_edge 640 + --pc_nscale 3 for L1+L2+L3 acceleration (~46 min
+    # vs ~14h baseline).
+    "Megadepth_Syn": dict(
+        root="data/Megadepth_Syn",
+        ir_subdir="train/infrared/phoenix/S6/zl548/MegaDepth_v1",
+        vis_subdir="train/phoenix/S6/zl548/MegaDepth_v1",
+        ir_pc_subdir="train/infrared_pc/S6/zl548/MegaDepth_v1",
+        vis_pc_subdir="train/phoenix_pc/S6/zl548/MegaDepth_v1",
+        ext=".jpg",
+    ),
 }
 
 
 # Phase-congruency hyperparameters. These match the v7 plan defaults; bumping
 # nscale to 5 increases edge sharpness slightly at ~25% extra runtime, while
 # dropping to 3 nearly halves runtime at noticeable edge quality loss.
+# v10 overrides via --pc_nscale 3 for L2 acceleration.
 PC_NSCALE = 4
 PC_NORIENT = 6
 
@@ -167,6 +185,29 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--overwrite", action="store_true",
                         help="Re-compute even if the PC output already exists "
                              "(default: skip existing for idempotent resume).")
+    # v10 acceleration knobs (default = v0-v9 byte-identical behaviour)
+    parser.add_argument("--recursive", action="store_true",
+                        help="Recursively scan input directory for source images "
+                             "and mirror nested directory structure into the PC "
+                             "output directory. Required for datasets with nested "
+                             "scene/dense/imgs layout (e.g. Megadepth_Syn). "
+                             "Default False = flat single-folder scan (M3FD/RoadScene).")
+    parser.add_argument("--max_long_edge", type=int, default=0,
+                        help="If > 0, downscale source images so max(H, W) == "
+                             "max_long_edge before phasecong. Speeds up PC by "
+                             "~7x at long_edge=640 (vs original ~1600). "
+                             "Must be >= the training-time ROAD_IMG_RESIZE "
+                             "(typically 480) to avoid quality loss from upsampling "
+                             "later. Default 0 = no downscale (v0-v9 behaviour).")
+    parser.add_argument("--df", type=int, default=32,
+                        help="Divisibility factor for max_long_edge resize "
+                             "(matches training-time df, default 32). Output "
+                             "side length is rounded to multiple of df.")
+    parser.add_argument("--pc_nscale", type=int, default=PC_NSCALE,
+                        help=f"phasecong 'nscale' parameter. Default {PC_NSCALE} "
+                             f"(v0-v9 baseline, matches v7 paper). Drop to 3 for "
+                             f"~2x speedup at slight edge sharpness loss; raise "
+                             f"to 5 for sharper edges at +25% runtime.")
     return parser.parse_args()
 
 
@@ -236,20 +277,35 @@ def _stretch_to_uint8(m: np.ndarray) -> np.ndarray:
     return (np.clip(m_norm, 0.0, 1.0) * 255.0).astype(np.uint8)
 
 
-def _process_one(task: Tuple[str, str]) -> Tuple[str, Optional[str]]:
-    """Worker: read one image, compute PC, write to disk.
+def _process_one(task: Tuple[str, str, int, int, int]) -> Tuple[str, Optional[str]]:
+    """Worker: read one image, optionally pre-resize, compute PC, write to disk.
+
+    task = (src_path, dst_path, max_long_edge, df, pc_nscale)
+
+    max_long_edge > 0 triggers pre-PC downscale to long edge = max_long_edge
+    (df-aligned), giving ~7x speedup on 1600 -> 640. Must be >= training
+    ROAD_IMG_RESIZE so downstream `cv2.resize(ir_pc, (w0_r, h0_r))` never
+    upscales (which would lose quality vs computing PC at higher res).
 
     Returns (src_path, error_message). error is None on success.
     """
-    src, dst = task
+    src, dst, max_long_edge, df, pc_nscale = task
     try:
         img = cv2.imread(src, cv2.IMREAD_GRAYSCALE)
         if img is None:
             return (src, "cv2.imread returned None")
+        # L3 pre-resize: shrink large images before phasecong (FFT cost ~O(N^2 log N))
+        if max_long_edge > 0:
+            h, w = img.shape
+            scale = float(max_long_edge) / max(h, w)
+            if scale < 1.0:  # only downscale, never upscale
+                new_h = max(df, int(round(h * scale) // df) * df)
+                new_w = max(df, int(round(w * scale) // df) * df)
+                img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
         img_f = img.astype(np.float64) / 255.0
         # phasecong returns 7-tuple (M, m, ori, ft, PC, EO, T). M is the
         # max-moment-of-phase-congruency, the standard "edge strength" map.
-        ret = phasecong(img_f, nscale=PC_NSCALE, norient=PC_NORIENT)
+        ret = phasecong(img_f, nscale=pc_nscale, norient=PC_NORIENT)
         m_uint8 = _stretch_to_uint8(ret[0])
         # Always write PNG regardless of source extension (PNG is lossless and
         # supports the full uint8 range without JPEG quantisation noise).
@@ -262,29 +318,53 @@ def _process_one(task: Tuple[str, str]) -> Tuple[str, Optional[str]]:
 
 
 def _build_tasks(in_dir: Path, out_dir: Path, ext: str,
-                 overwrite: bool) -> Tuple[List[Tuple[str, str]], int]:
+                 overwrite: bool, recursive: bool,
+                 max_long_edge: int, df: int,
+                 pc_nscale: int) -> Tuple[List[Tuple[str, str, int, int, int]], int]:
     """Walk ``in_dir`` and pair each image with its PC output path. Returns
-    (tasks, n_skipped). n_skipped counts already-existing outputs."""
+    (tasks, n_skipped). n_skipped counts already-existing outputs.
+
+    recursive=True scans nested subdirectories and mirrors the directory
+    structure to out_dir (e.g. in_dir/foo/bar/baz.jpg -> out_dir/foo/bar/baz.png).
+    Required for datasets like Megadepth_Syn with scene/dense/imgs nesting.
+    Default False = flat scan (M3FD/RoadScene single-folder layout).
+
+    max_long_edge / df / pc_nscale are passed through to each task tuple so
+    workers know how to process the image (L2 + L3 acceleration knobs).
+    """
     if not in_dir.is_dir():
         raise SystemExit(f"Input directory not found: {in_dir}")
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    tasks: List[Tuple[str, str]] = []
+    tasks: List[Tuple[str, str, int, int, int]] = []
     skipped = 0
-    src_files = sorted(p for p in in_dir.iterdir()
-                       if p.is_file() and p.suffix.lower() == ext)
+    if recursive:
+        # rglob preserves nested structure; sort for determinism
+        src_files = sorted(p for p in in_dir.rglob(f"*{ext}")
+                           if p.is_file() and p.suffix.lower() == ext)
+    else:
+        src_files = sorted(p for p in in_dir.iterdir()
+                           if p.is_file() and p.suffix.lower() == ext)
     for src in src_files:
-        dst = out_dir / (src.stem + ".png")
+        if recursive:
+            # mirror nested structure under out_dir, swapping ext to .png
+            rel = src.relative_to(in_dir).with_suffix(".png")
+            dst = out_dir / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            dst = out_dir / (src.stem + ".png")
         if dst.is_file() and not overwrite:
             skipped += 1
             continue
-        tasks.append((str(src), str(dst)))
+        tasks.append((str(src), str(dst), max_long_edge, df, pc_nscale))
     return tasks, skipped
 
 
 def _process_split(name: str, in_dir: Path, out_dir: Path, ext: str,
-                   workers: int, overwrite: bool) -> None:
-    tasks, skipped = _build_tasks(in_dir, out_dir, ext, overwrite)
+                   workers: int, overwrite: bool, recursive: bool,
+                   max_long_edge: int, df: int, pc_nscale: int) -> None:
+    tasks, skipped = _build_tasks(in_dir, out_dir, ext, overwrite, recursive,
+                                  max_long_edge, df, pc_nscale)
     total = len(tasks) + skipped
     if total == 0:
         print(f"  [{name}] no `*{ext}` files in {in_dir}")
@@ -328,7 +408,12 @@ def main() -> None:
     jobs = _resolve_jobs(args)
     workers = _resolve_workers(args.workers)
 
-    print(f"PC pre-computation: nscale={PC_NSCALE}, norient={PC_NORIENT}")
+    print(f"PC pre-computation: nscale={args.pc_nscale}, norient={PC_NORIENT}")
+    if args.max_long_edge > 0:
+        print(f"Pre-resize: max_long_edge={args.max_long_edge} (df={args.df}) -- "
+              f"L3 acceleration enabled")
+    if args.recursive:
+        print(f"Scan mode: recursive (nested directory structure mirrored to output)")
     print(f"Workers: {workers}  |  Overwrite: {args.overwrite}")
 
     grand_t0 = time.time()
@@ -344,9 +429,11 @@ def main() -> None:
         vis_out = root / job["vis_pc_subdir"]
 
         _process_split(f"{job['name']}/IR",
-                       ir_in, ir_out, job["ext"], workers, args.overwrite)
+                       ir_in, ir_out, job["ext"], workers, args.overwrite,
+                       args.recursive, args.max_long_edge, args.df, args.pc_nscale)
         _process_split(f"{job['name']}/VIS",
-                       vis_in, vis_out, job["ext"], workers, args.overwrite)
+                       vis_in, vis_out, job["ext"], workers, args.overwrite,
+                       args.recursive, args.max_long_edge, args.df, args.pc_nscale)
 
     grand_dt = time.time() - grand_t0
     print(f"\nAll done in {grand_dt/60:.1f} min total")
