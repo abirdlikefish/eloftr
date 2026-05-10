@@ -212,3 +212,81 @@ logs\tb_logs\m3fd_v7_pcclahe\version_0\checkpoints\
 - ep0-ep5 全部踢出 top5、ep7-ep9 单调微跌 → ep6 是真天花板，max_epochs=10 设置合适，**不需要 v7.5 慢 LR 续训**
 
 毕设论文核心叙事：v0-v6.1 链路在架构 / 数据 / 训练 schedule 三维度已经收敛（v6 → v6.1 仅 +0.003 综合通用性），但在输入端引入经典模态不变先验（Phase Congruency 边缘 + CLAHE 直方图均衡）后，模型在 in-domain 和 OOD 上同时大幅提升，证明**跨模态匹配的真正瓶颈是"输入端模态对齐"，而不是"网络深度 / 容量 / 训练时长"**。
+
+## 13. v10 升级：PC 缓存 L1+L2+L3 三层加速 + fix_pc_cache_alignment 救场
+
+> 本节描述 v10 (Megadepth_Syn 4 卡 DDP scale-up，[eloftr-v10-msyn](../eloftr-v10-msyn/SKILL.md)) 落地的 PC 缓存改进。**v0-v9 PC 缓存接口字节级兼容**——下面的 CLI 参数都是默认值保 v9 兼容，新参数才走 v10 加速。
+
+### 13.1 三层加速（Megadepth_Syn ~258K cache 从 ~14h 压到 ~46 min, ~18×）
+
+`MyScripts/precompute_pc_edges.py` v10 新增 3 个 CLI flag（默认值与 v0-v9 字节级兼容）：
+
+| 层 | 改动 | CLI flag | 默认值 | v10 用 | 加速比 |
+|---|---|---|---|---|---|
+| **L1 pyfftw** | 让 phasepack 走 pyfftw 而非 scipy fftpack（系统装包，非 CLI）| — | （依装机环境，OS 级 `pip install pyfftw`）| 启用 | ~1.3× |
+| **L2 nscale 4→3** | 减少 phasecong 滤波尺度数 | `--pc_nscale N` | 4 | 3 | ~2× |
+| **L3 预 resize** | 源图先降到 max_long_edge 再算 PC | `--max_long_edge N` | 0 (= 不 resize) | 640 | ~7× |
+| 嵌套目录支持 | 递归扫描 + 镜像输出 | `--recursive` | False | True | — |
+| **综合** | — | — | — | — | **~18×** |
+
+v10 用例：
+```bash
+python MyScripts/precompute_pc_edges.py --dataset Megadepth_Syn \
+       --recursive --max_long_edge 640 --pc_nscale 3 --workers 24
+# 实测 ~46 min on 24 worker (vs ~14h baseline 估算)
+```
+
+`DATASET_SHORTCUTS` 字典已加 `Megadepth_Syn` 项（M3FD-style source/_pc 同级布局），跟 M3FD/RoadScene 一致风格。
+
+### 13.2 ⚠️ L3 副作用：df 截断破坏 cache aspect
+
+`--max_long_edge 640 --df 32` 联合作用时，对源图做 resize 会单边砍像素：
+```
+raw (1090, 696) → scale=640/1090=0.587 → new_h=640, new_w=409
+new_w 经 df=32 对齐 → 384  ← 砍掉 25 像素！
+cache aspect = 640/384 = 1.6667 ≠ raw 1.5661 (差 6.4%)
+```
+
+部分 raw aspect 触发 dataset 加载时 cache / raw 在 `_resize_keep_aspect(_, 480, 32)` 后 **target shape 不一致**，`np.stack([ir_pad, ir_pc_pad])` 失败崩。约 30-40% 的 raw aspect 会触发。
+
+### 13.3 fix_pc_cache_alignment.py：一次性补救脚本
+
+[MyScripts/fix_pc_cache_alignment.py](../../../MyScripts/fix_pc_cache_alignment.py)：把所有 cache 强 resize 到"raw 在 dataset 端 `_resize_keep_aspect(_, 480, 32)` 的产物 shape"。fix 后 dataset L383 `cv2.resize(ir_pc_raw, (w0_r, h0_r))` 是 1.0× no-op，cache 跟 raw 同 shape，stack 必然成功。
+
+```bash
+# dry-run 先看（~15 min, 24 worker, IR + VIS 两路）
+python MyScripts/fix_pc_cache_alignment.py --dataset Megadepth_Syn --dry-run --workers 24
+
+# 实跑（~30 min）
+python MyScripts/fix_pc_cache_alignment.py --dataset Megadepth_Syn --workers 24
+```
+
+idempotent，可中断重跑。不损失物理对齐（数学验证：复合 scale 跟 raw 直接 → target 完全相等，PC 只额外多一次 cv2.resize 的 ~0% 信息损失）。详见 [eloftr-v10-msyn §4.3](../eloftr-v10-msyn/SKILL.md)。
+
+### 13.4 配套 dataset target-shape check（[src/datasets/roadscene.py L353-404](../../../src/datasets/roadscene.py)）
+
+v0-v9 的"strict shape exact match" check 改成 "target-shape match"（新加 `_resize_target_shape` helper 与 fix script 共用逻辑）：
+
+```python
+target_raw_ir = _resize_target_shape(ir_raw.shape, self.img_resize, self.df)
+target_pc_ir = _resize_target_shape(ir_pc_raw.shape, self.img_resize, self.df)
+if target_raw_ir != target_pc_ir:
+    raise RuntimeError("... Run MyScripts/fix_pc_cache_alignment.py first.")
+```
+
+兼容性矩阵：
+
+| 场景 | check 结果 | 备注 |
+|---|---|---|
+| v0-v9 (M3FD/RoadScene) cache 跟 raw 同 res | ✓ pass | `_target_shape` 返回相同 |
+| v10 fix 后 cache 已是 dataset target shape | ✓ pass | dataset L383 是 no-op |
+| v10 漏 fix 部分 cache target ≠ raw target | ✗ raise | 错误信息直接提示跑 fix script |
+
+### 13.5 `--max_long_edge` 选 640 还是别的值
+
+如果将来要调 `ROAD_IMG_RESIZE`（v10 用 480）到更高（比如 640 / 832），cache 必须跟随重生。简单两条规则：
+
+- `max_long_edge >= ROAD_IMG_RESIZE`：cache 比训练分辨率高，训练时 dataset 会 downsample cache，**安全**
+- `max_long_edge < ROAD_IMG_RESIZE`：cache 比训练分辨率低，dataset 会 upsample cache，**PC 质量损失（不推荐）**
+
+v10 选 640 是"留一点 buffer"（480 + 160），将来调 ROAD_IMG_RESIZE 到 640 不需要重生 PC cache。如果调到 832 才需要重新 precompute（带 `--max_long_edge 832`）。

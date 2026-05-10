@@ -642,9 +642,9 @@ def main() -> None:
         help="write Markdown to this file (default: stdout)",
     )
     sp_agg.add_argument(
-        "--include", default=r"^(roadscene|m3fd)_v\d",
+        "--include", default=r"^(roadscene|m3fd|msyn)_v\d",
         help=r"regex; only exp dirs matching it are kept "
-             r"(default: ^(roadscene|m3fd)_v\d)",
+             r"(default: ^(roadscene|m3fd|msyn)_v\d)",
     )
     sp_agg.add_argument(
         "--exclude", default=r"(_debug|_small|_compat_test)",

@@ -89,6 +89,9 @@ class MultiSceneDataModule(pl.LightningDataModule):
         self.road_homography_prob = getattr(config.DATASET, 'ROAD_HOMOGRAPHY_PROB', 1.0)
         self.road_homography_kwargs = dict(getattr(config.DATASET,
                                                   'ROAD_HOMOGRAPHY_KWARGS', {}))
+        # v11 dual-side Homography: warp BOTH IR and VIS by independent H.
+        # Default False = v0-v10 byte-identical (only VIS warped).
+        self.road_homography_dual = getattr(config.DATASET, 'ROAD_HOMOGRAPHY_DUAL', False)
 
         # v7_pcclahe input-side options. R3 three-layer default-value equality:
         # the fallback literals here MUST match src/config/default.py and
@@ -288,6 +291,7 @@ class MultiSceneDataModule(pl.LightningDataModule):
                 homography_aug=(self.road_homography_aug and mode == 'train'),
                 homography_prob=self.road_homography_prob,
                 homography_kwargs=self.road_homography_kwargs,
+                homography_dual=self.road_homography_dual,
                 augment_fn=(self.augment_fn if mode == 'train' else None),
                 fp16=self.fp16,
                 names=local_names,  # DDP pre-shard hand-off (None-equivalent in single-card)

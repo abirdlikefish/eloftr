@@ -49,7 +49,6 @@ from pathlib import Path
 from typing import Dict, List
 
 import cv2
-import matplotlib.cm as cm
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
@@ -58,7 +57,7 @@ from src.config.default import get_cfg_defaults
 from src.datasets.roadscene import RoadSceneDataset
 from src.loftr import LoFTR
 from src.utils.misc import lower_config
-from src.utils.plotting import make_matching_figure
+from src.utils.plotting import make_matching_figure, error_colormap, dynamic_alpha
 
 
 # --------------------------------------------------------------------------- #
@@ -283,8 +282,19 @@ def _save_pair_figure(out_path: Path,
     mkpts1_v = mkpts1[keep] - np.array([c0_1, r0_1], dtype=mkpts1.dtype) if keep.any() else np.zeros((0, 2))
     errs_v = pixel_errs[keep] if keep.any() else np.zeros(0)
 
+    # Colour & alpha: align with training-side TB figure
+    # (src/utils/plotting.py:_make_evaluation_figure_roadscene). Previously
+    # this dump used cm.jet(1 - err/5), which is REVERSED vs the TB rule:
+    # err=0 painted as deep red and err>=5 as deep blue, so the most accurate
+    # matches looked like errors and vice versa. error_colormap puts
+    # err=0 -> green, err=thr -> yellow, err>=2*thr -> red, matching the
+    # P@thr correctness boundary and intuitive "green=good / red=bad".
+    # dynamic_alpha makes dense-match figures readable rather than a wall of
+    # opaque coloured lines.
+    conf_thr_vis = 3.0
     if len(errs_v):
-        color = cm.jet(np.clip(1.0 - errs_v / max(thresholds), 0.0, 1.0))
+        color = error_colormap(errs_v, conf_thr_vis,
+                               alpha=dynamic_alpha(len(errs_v)))
     else:
         color = np.zeros((0, 4))
     p_at_3 = float((pixel_errs < 3.0).mean()) if len(pixel_errs) else 0.0

@@ -196,6 +196,10 @@ sync_batchnorm=config.TRAINER.WORLD_SIZE > 1
 
 ### 4.3 ★ RandomConcatSampler 在 DDP 下不分片（aligned IR-VIS 灾区）
 
+> **★ 2026-05-08 已通过 image-level pre-shard 真修复**（v10 落地，详见本节末"修复"段）。下面的"问题描述"段落保留作为历史背景 + 排查时的诊断指南；**v10+ 4 卡训练默认享受修复，不需要手动 cfg N_SAMPLES_PER_SUBSET 缩到 1/world_size**。
+
+#### 问题描述（v0-v9 + v10 修复前）
+
 [src/datasets/sampler.py:16-17](../../../src/datasets/sampler.py)：
 
 ```python
@@ -203,19 +207,60 @@ NOTE: This sampler behaves differently with DistributedSampler.
       It assume the dataset is splitted across ranks instead of replicated.
 ```
 
-[src/lightning/data.py:393-405](../../../src/lightning/data.py) `train_dataloader` **不**用 `DistributedSampler` 包装 `RandomConcatSampler`，配合 [train.py:221](../../../train.py) 的 `replace_sampler_ddp=False`，意味着：
+[src/lightning/data.py train_dataloader](../../../src/lightning/data.py) **不**用 `DistributedSampler` 包装 `RandomConcatSampler`，配合 [train.py:221](../../../train.py) 的 `replace_sampler_ddp=False`，意味着：
 
-- ScanNet/MegaDepth 路径：[data.py:282-283](../../../src/lightning/data.py) 的 `get_local_split(npz_names, world_size, rank, seed)` 把 npz 文件按 rank 分片，每张卡只构建自己那份 ConcatDataset（数据已分片，sampler 对全集采样无重复）→ DDP 正确。
-- **Aligned IR-VIS（M3FD / RoadScene）路径**：[data.py:250-277](../../../src/lightning/data.py) 短路分支**直接把全集 ConcatDataset 给所有 rank**，**不调用 `get_local_split`**。配合不分片的 RandomConcatSampler，4 张卡可能：
-  - 同 seed → 4 张卡抽到完全相同的 indices → 4× 重复 step + 实际 effective_bs 只有 4（不是 16）
-  - 不同 seed（PL 1.3.5 dataloader worker seed 行为依实现）→ 4 张卡抽到不同 945 indices → 实际看了 4 倍数据/epoch
+- ScanNet/MegaDepth 路径：[data.py 的 `get_local_split(npz_names, world_size, rank, seed)`](../../../src/lightning/data.py) 把 npz 文件按 rank 分片，每张卡只构建自己那份 ConcatDataset（数据已分片，sampler 对全集采样无重复）→ DDP 正确。
+- **Aligned IR-VIS（M3FD / RoadScene / Megadepth_Syn）路径（v10 修复前）**：短路分支**直接把全集 ConcatDataset 给所有 rank**，**不调用 `get_local_split`**。配合不分片的 RandomConcatSampler + 全局 `torch.manual_seed(cfg.TRAINER.SEED)`，4 张卡抽到完全相同的 indices → 4× 重复 step + 实际 effective_bs 只有 4（不是 16）。
 
-**4 卡首次跑 M3FD 必做 sanity**：
-1. TB 第一个 step 的 `train_loss` 与单卡接近（zero-shift v9 时）→ 排除 sampler 重叠
-2. 看 4 张卡的 rank 0/1/2/3 启动 log 的 `[rank N]: building RoadSceneDataset (...) from .../train_pairs.txt`，应该都看到 3780 → 确认数据集**未分片**（这是预期）
-3. 跑 1 epoch 后看 `len(train_loader)` 实际产出 step 数
+#### 修复（v10 落地，aligned IR-VIS 短路分支增加 image-level pre-shard）
 
-如果观察到 step 数显著少于单卡 / 实际看的数据多于全集，必须显式给 RandomConcatSampler 加 DDP 分片逻辑（fork 一个 DDP-aware 版本），或在 cfg 里把 `N_SAMPLES_PER_SUBSET` 调成 `3780/world_size`。
+v10 mode B 4 卡 DDP 是这条 design gap 首次实战。修复在 [src/lightning/data.py L248-273](../../../src/lightning/data.py)（mirrors ScanNet/MegaDepth 的 scene-level `get_local_split` 模式）：
+
+```python
+if is_aligned_irvis(data_source):
+    # DDP image-level pre-sharding (mirrors the scene-level
+    # get_local_split call below for ScanNet/MegaDepth).
+    with open(scene_list_path, 'r', encoding='utf-8') as f:
+        all_names = [line.strip() for line in f.readlines() if line.strip()]
+    if mode == 'train' and self.world_size > 1:
+        local_names = list(get_local_split(
+            all_names, self.world_size, self.rank, self.seed))
+        logger.info(
+            f'[rank {self.rank}]: aligned IR-VIS train pre-shard: '
+            f'{len(local_names)}/{len(all_names)} samples '
+            f'(disjoint across {self.world_size} ranks; seed={self.seed})')
+    else:
+        local_names = all_names
+    # ...
+    ds = RoadSceneDataset(..., names=local_names, ...)
+```
+
+`RoadSceneDataset.__init__` 接受新加的 `names: Optional[List[str]] = None`（None = 走原 `_read_index_file(list_path)` 路径，向后兼容 v0-v9 单卡）。Pre-shard **只在 train mode** 触发；val / test 保持 full + PL 默认 `DistributedSampler` 切片。
+
+修复后 v10 mode B 实测 log:
+```text
+[rank 0]: aligned IR-VIS train pre-shard: 26521/106083 samples (disjoint across 4 ranks; seed=66)
+[rank 1]: aligned IR-VIS train pre-shard: 26521/106083 samples ...
+[rank 2/3]: ...
+```
+26521 × 4 ≈ 106083 全集 ✓ 4 rank 严格不重叠 1 epoch 见 train 全集。
+
+详见 [eloftr-v10-msyn §4.1](../eloftr-v10-msyn/SKILL.md)。
+
+#### sanity check（任何 4 卡 aligned IR-VIS 训练首次启动必看）
+
+1. 启动 log 应有 4 条 `[rank N]: aligned IR-VIS train pre-shard: <local>/<total> samples ...` → pre-shard 触发
+2. `<local>` × `world_size` ≈ `<total>` （±1 round-up 误差）→ disjoint 切片正确
+3. PL 进度条 `Epoch 0: ... <X>/<Y>`，`X` = 单 rank `N_SAMPLES_PER_SUBSET / batch_size`（不是 `<total> / batch_size`）
+
+如果 log **没出现 pre-shard 行**：要么 mode 不是 train（val/test 不分片是预期）, 要么 `world_size <= 1`（单卡退化到 full set, 是预期）, 要么本仓库未升到 v10 修复版本（git pull）。
+
+#### v10 cfg 里 N_SAMPLES_PER_SUBSET 的语义变化
+
+修复前: 因为 sampler 不分片, 单 rank 跑 N_SAMPLES_PER_SUBSET 个 sample, **4 rank 抽相同的 N_SAMPLES**, 实际只用了 N_SAMPLES 个 unique 样本。
+修复后: 单 rank 拿到 `local_shard_size = total / world_size`, RandomConcatSampler 按 `subset_replacement=False` 先 randperm(local_shard) 然后取 N_SAMPLES_PER_SUBSET（如果 N_SAMPLES > local_shard 则 with-replacement 补差）。**4 rank * N_SAMPLES = 单 epoch 总 sample passes**, 设 N_SAMPLES ≈ local_shard 即可让 1 epoch 覆盖 train 全集。
+
+v10 mode B cfg: `N_SAMPLES_PER_SUBSET = 28750` ≈ `local_shard 26521`, 4 * 28750 = 115K ≈ train 全集 106083, 完美覆盖。
 
 ### 4.4 复现性退化（DDP 非确定性）
 
@@ -349,7 +394,7 @@ tensorboard --logdir=logs/tb_logs --port=6006
 
 模式 B / C 的接受范围放宽到 ±0.01（DDP 非确定性）。
 
-## 6. v0..v8 全链路多卡注意点速查
+## 6. v0..v10 全链路多卡注意点速查
 
 | 版本 | 起点 ckpt | 单卡 vs 多卡风险点 |
 |---|---|---|
@@ -357,10 +402,56 @@ tensorboard --logdir=logs/tb_logs --port=6006
 | v1 contrast | v0 | 同上 |
 | v2 modemb | v1 | learnable emb 多卡时 DDP all-reduce 自动平均，无影响 |
 | v3/v4 freeze | v2 | FREEZE_BACKBONE_BN=True 多卡时 backbone BN 不更新，与单卡一致；FREEZE_BN=True 时 sync_bn 替换的 SyncBN 仍 frozen |
-| v5 m3fd | v4 ep0 | **§4.3 RandomConcatSampler 不分片首次出现**（v0-v4 是 RoadScene 也命中但样本少不明显，v5 M3FD 3780 才显著） |
+| v5 m3fd | v4 ep0 | **§4.3 RandomConcatSampler 不分片首次出现**（v0-v4 是 RoadScene 也命中但样本少不明显，v5 M3FD 3780 才显著；2026-05-08 v10 修复后不再是问题） |
 | v6/v6.1 | v5 ep9 / v6 ep6 | spillover cure（§2.3）服务器 24GB 不需要；schedule 继承 v5 |
 | v7 pcclahe | v6.1 ep4 | PC cache 服务器同步（§5.3）；stage0 inflate hook 无多卡问题 |
-| v8 msbn | v7 ep6 | **§4.1 LR 灾 + §4.2 sync_bn × MSBN，本仓库多卡风险最大的版本**；v9 = 在服务器复现 v8 |
+| v8 msbn | v7 ep6 | **§4.1 LR 灾 + §4.2 sync_bn × MSBN，本仓库多卡风险最大的版本**；v9_server_repro = 在服务器复现 v8 |
+| v9_e2e | outdoor.ckpt | 单卡训练，多卡风险不直接命中；如果想用 4 卡复现 v9_e2e 80 ep 同样需要 §4.1 LR 反向缩放 |
+| **v10_msyn** | outdoor.ckpt | **首个 4 卡 DDP ship run + aligned IR-VIS 数据集**；§4.1-4.5 五个地雷全部命中并各自处理（§4.3 真修复）；wall-clock 实测见 §6.5 |
+
+### 6.5 wall-clock 实战修订（v10 mode B 实测，2026-05-08）
+
+**v10 是本仓库首个 4 卡 DDP + aligned IR-VIS + sync_bn = True 的 ship run**。实测速度跟 plan §10 估算（"3-4h"）出现重大偏差，根因是 sync_bn 在 RepVGG 多 BN 架构上的开销被严重低估了。
+
+**实测分解**（mode B 4 卡 3090, bs=4 effective_bs=16, sync_bn=True）：
+
+| 操作 | 单 step 耗时 | 来源 |
+|---|---|---|
+| forward (16 sample × 480² × 16M params) | ~0.15s | GPU 计算 |
+| backward | ~0.30s | 反向比 forward 慢 2× |
+| NCCL allreduce 16M grads | ~0.05s | 64MB / 25GB/s × 4 rank |
+| **sync_bn 跨卡同步**（**主要被低估的开销**）| **~0.15s** | RepVGG backbone ~30 个 BN + MSBN 4 个 BN，每个 BN forward + backward 都要 4-rank sync mean/var |
+| 其他（optimizer / dataloader prefetch / 等）| ~0.05s | — |
+| **总** | **~0.7s/step** | **= 1.44 it/s** ✓ |
+
+**对照单卡 v9_e2e（M3FD bs=4，无 sync_bn）**：~0.07s/step (13.69 it/s val phase)
+
+| 阶段 | v10 单 step | v10 step 数（per rank）| v10 时长 |
+|---|---|---|---|
+| train | ~0.7s | 7187（28750/4）| ~83 min |
+| val（forward only, no allreduce, no sync_bn update）| ~0.15s | 3025（12101/4）| ~8 min |
+| **per epoch 总** | | | **~90 min ≈ 1.5h** |
+| **10 epoch（不 ES）** | | | **~15h** |
+| **8 epoch（ES patience=3 触发）** | | | **~12h** |
+
+→ ship run 实际 **12-15h**（OS page cache 在 ep1+ 加速 IO 后可能压到 10-12h）。
+
+**plan §10 估算 "3-4h" 偏乐观 4× 的根因**：
+1. 我估"NCCL + sync_bn 开销 ~0.1s/step"基于"DDP 通用经验"，未考虑 RepVGG backbone 的 BN 数量
+2. 没有先验数据点：v0-v9 全部单卡跑 + v9_server_repro 没真做完
+3. 实际 sync_bn 占总 step 时间 ~25%（0.15s / 0.7s），是 plan 估算与现实的最大差异源
+
+**v11+ 多卡 DDP 训练时间估算公式（修订版）**：
+
+```
+per_rank_step_time ≈ 0.7s   (RepVGG + sync_bn + 4 卡 NCCL, bs=4 effective_bs=16, 480² resolution)
+per_rank_train_steps_per_epoch = N_SAMPLES_PER_SUBSET / batch_size
+per_rank_val_steps_per_epoch = ceil(val_pairs / world_size)   (val_batch_size=1)
+epoch_time ≈ per_rank_train_steps × 0.7 + per_rank_val_steps × 0.15  (in seconds)
+total_wall_clock = max_epochs × epoch_time × 1.05 (overhead)  (不考虑 ES early stop)
+```
+
+未来加新 v_x 4 卡 ship run 之前，先用上面公式算 wall-clock，再决定 max_epochs 是否合理（避免又被 plan 估算偏乐观坑）。
 
 ## 7. 何时用本 skill
 
@@ -368,4 +459,5 @@ tensorboard --logdir=logs/tb_logs --port=6006
 - 把本地 .bat 翻成服务器 .sh，搞不清哪些 Windows 补丁要回滚（§2.1，答案：都不回滚）
 - 计划多卡训练前评估 LR / WARMUP / sampler / sync_bn 风险（§4）
 - v9 启动前对照必改清单（§5.2）+ 验收标准（§5.5）
+- v10+ aligned IR-VIS 4 卡 ship run 启动前估算 wall-clock（§6.5 修订公式）+ 验证 §4.3 pre-shard log 是否出现
 - 跑出来数字与本地差很多时反查（§4 + §6）

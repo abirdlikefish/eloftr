@@ -205,10 +205,21 @@ ln -s /data/xyjiang/Datasets/Infrared_image_datasets/road-scene-infrared-visible
 mkdir -p cropinfrared_pc crop_LR_visible_pc index
 cd ..
 
+# Megadepth_Syn (v10): 实体目录 + train 子目录 + 2 个 train 子目录软链 + 2 个 _pc 实体子目录
+mkdir -p Megadepth_Syn/{train,index}
+cd Megadepth_Syn
+mkdir -p train/{infrared_pc,phoenix_pc}
+ln -s /data/xyjiang/image_style_transfer/4090_data/Megadepth_Syn/train/infrared  train/infrared
+ln -s /data/xyjiang/image_style_transfer/4090_data/Megadepth_Syn/train/phoenix   train/phoenix
+# test/Undistorted_SfM 不软链 (v10 不用, 留 v11+ B 路线 真 epipolar pose AUC eval)
+cd ..
+
 # 验证
 ls M3FD_Detection/Ir | head -3                           # 期望: 00000.png 等
 ls RoadScene/cropinfrared | head -3                       # 期望: FLIR_00006.jpg 等
 ls RoadScene/cropinfrared | wc -l                         # 期望: 220
+ls -L Megadepth_Syn/train/infrared/phoenix/S6/zl548/MegaDepth_v1 | head -3   # 期望: 0000  0001  0003 等
+ls -L Megadepth_Syn/train/infrared/phoenix/S6/zl548/MegaDepth_v1 | wc -l     # 期望: ~195 scene
 ```
 
 > hook 不拦 `ln -s`，因为 `ln -s` 写的是软链本体（在仓库内白名单），源是只读复用。
@@ -248,10 +259,12 @@ wc -l data/RoadScene/index/*.txt              # 期望: 176 / 22 / 22 (220 张 8
 `data/<ds>/` 是仓库内实体可写目录（不是整目录软链），所以 `data/<ds>/{Ir_pc,Vis_pc}/` 自然落在项目内可写位置，**与 windows 本地完全一致，cfg / dataset / precompute 脚本零改动**。
 
 ```
-data/M3FD_Detection/Ir_pc/                 ← 仓库内实体, precompute_pc_edges.py 默认输出
+data/M3FD_Detection/Ir_pc/                                          ← 仓库内实体, precompute_pc_edges.py 默认输出
 data/M3FD_Detection/Vis_pc/
-data/RoadScene/cropinfrared_pc/            ← 同样
+data/RoadScene/cropinfrared_pc/                                     ← 同样
 data/RoadScene/crop_LR_visible_pc/
+data/Megadepth_Syn/train/infrared_pc/S6/zl548/MegaDepth_v1/...      ← v10 新增, M3FD-style source/_pc 同级
+data/Megadepth_Syn/train/phoenix_pc/S6/zl548/MegaDepth_v1/...
 ```
 
 `MyScripts/precompute_pc_edges.py` 默认 `ir_out = root / job["ir_pc_subdir"]` 直接落对位置。Linux 入口脚本：
@@ -261,6 +274,10 @@ bash MyScripts/precompute_pc_edges.sh        # 默认 M3FD + RoadScene 一起算
 # 或单独
 python MyScripts/precompute_pc_edges.py --dataset M3FD
 python MyScripts/precompute_pc_edges.py --dataset RoadScene
+
+# v10 Megadepth_Syn 走 L1+L2+L3 三层加速 (~46 min, vs baseline ~14h)
+python MyScripts/precompute_pc_edges.py --dataset Megadepth_Syn \
+       --recursive --max_long_edge 640 --pc_nscale 3 --workers 24
 ```
 
 > AGENTS.md §8 第 1 条遗留 TODO（"PC 缓存输出位置 → `data/pc_cache/<dataset>/`"）在子目录软链方案下作废，可在毕业前 cleanup AGENTS.md 时一并删除。
@@ -274,9 +291,40 @@ UserWarning: Module 'pyfftw' (FFTW Python bindings) could not be imported.
 Falling back on the slower 'fftpack' module for 2D Fourier transforms.
 ```
 
-后果：M3FD 8400 张 PC 预计算从 ~35 min 拖到 ~50 min。可选优化 `pip install pyfftw`（**在 `eloftr_yurupeng` env 里**，不要装到导师 env），但 pyfftw 需要 `libfftw3-dev` 系统库，install 不一定顺利。可跳过。
+后果：M3FD 8400 张 PC 预计算从 ~35 min 拖到 ~50 min。**v10 Megadepth_Syn ~258K cache 强烈建议装 pyfftw**（占 PC 总耗时 30%）：
 
-### 5.2 conda env 实际位置
+```bash
+# 在 eloftr_yurupeng env 里 (不要装到导师 env)
+source /home/xyjiang/anaconda3/bin/activate eloftr_yurupeng
+pip install pyfftw                                # 一次性, libfftw3-dev 系统已装
+python -c "import pyfftw; print(pyfftw.__version__)"   # 验证
+```
+
+### 5.2 v10 PC cache fix script 工作流（Megadepth_Syn 专用救场）
+
+[MyScripts/fix_pc_cache_alignment.py](../../../MyScripts/fix_pc_cache_alignment.py) 是 **v10 一次性补救脚本**：当 precompute 用 L3 优化（`--max_long_edge 640 --df 32`）时，部分 raw aspect 触发 df 截断破坏 cache 跟 raw 在 dataset 端 `_resize_keep_aspect` 的 target shape 不一致 → np.stack 崩。fix script 把所有 cache 强 resize 到 raw 的 dataset target shape，让 dataset 加载时 cv2.resize 是 no-op。
+
+工作流（v10 ship 路径）:
+```bash
+# 1. precompute 跑完 (~46 min)
+python MyScripts/precompute_pc_edges.py --dataset Megadepth_Syn \
+       --recursive --max_long_edge 640 --pc_nscale 3 --workers 24
+
+# 2. dry-run 看有多少 cache 需要修 (~15 min, IR + VIS 两路)
+python MyScripts/fix_pc_cache_alignment.py --dataset Megadepth_Syn --dry-run --workers 24
+# 期望输出: fixed: ~257790 (= 128895 IR + 128895 VIS, 100% 都需要修)
+
+# 3. 实跑 (~30 min, inplace 写回, idempotent)
+python MyScripts/fix_pc_cache_alignment.py --dataset Megadepth_Syn --workers 24
+```
+
+跑完后 dataset 端 [src/datasets/roadscene.py L353-404](../../../src/datasets/roadscene.py) 的 target-shape check 会通过, mode A/B debug 不再报 `RuntimeError: PC cache shape ... resizes to ...`。
+
+**注意**：fix script 不是 v0-v9 的需求。M3FD/RoadScene 用 default precompute（`--max_long_edge 0`，不缩放）→ cache 跟 raw 同 shape → 不需要 fix。仅当用 v10 风格的 L3 加速（`--max_long_edge > 0`）时才需要 fix script。
+
+详见 [eloftr-v10-msyn §4.3](../eloftr-v10-msyn/SKILL.md) + [eloftr-megadepth-syn-data §7](../eloftr-megadepth-syn-data/SKILL.md) + [eloftr-v7-pcclahe §13.3](../eloftr-v7-pcclahe/SKILL.md)。
+
+### 5.3 conda env 实际位置
 
 `eloftr_yurupeng` 不在标准 `~/anaconda3/envs/`，而在 `/data/xyjiang/envs/eloftr_yurupeng`（系统盘紧时常见做法）。conda 通过 `envs_dirs` 配置识别，所以：
 

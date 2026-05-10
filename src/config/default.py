@@ -240,6 +240,17 @@ _CN.DATASET.ROAD_DF = 32              # final H, W are multiples of df
 _CN.DATASET.ROAD_PAD_SIZE = None
 _CN.DATASET.ROAD_HOMOGRAPHY_AUG = True  # train-only random Homography on VIS
 _CN.DATASET.ROAD_HOMOGRAPHY_PROB = 1.0
+# v11 dual-side Homography: when True, warp BOTH IR (image0) and VIS (image1)
+# by independent random Homographies; homography_0to1 = H_vis @ inv(H_ir).
+# Default False = v0-v10 byte-identical (only VIS warped, IR untouched).
+_CN.DATASET.ROAD_HOMOGRAPHY_DUAL = False
+# Per-axis kwargs forwarded to _random_homography (rot_deg, scale_range,
+# trans_ratio, persp_ratio). new_allowed=True so v11 cfg can declare new
+# sub-fields without YACS strict-mode KeyError. When the cfg leaves this
+# CN empty, data.py forwards an empty dict and _random_homography uses
+# its function defaults (rot_deg=10, scale (0.9,1.1), trans 0.05, persp
+# 0.03 = v0-v10 strength). v11 cfg overrides with the aggressive preset.
+_CN.DATASET.ROAD_HOMOGRAPHY_KWARGS = CN(new_allowed=True)
 
 # -- # v7_pcclahe PC-cache sub-directories (per-dataset because RoadScene uses
 #    snake_case sub-dirs and M3FD uses CapitalCase; default '' = unused).

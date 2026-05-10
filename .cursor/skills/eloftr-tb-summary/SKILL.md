@@ -43,17 +43,25 @@ description: Single source-of-truth index for EfficientLoFTR cross-experiment tr
    - 默认 include = `^(roadscene|m3fd)_v\d`
    - 默认 exclude = `(_debug|_small|_compat_test)`
    - 新加 dataset (例 `llvip_v10_xxx`) 时，跑 `aggregate --include "^(roadscene|m3fd|llvip)_v\d"` 临时扩展，并把更宽的 include 反写到本 skill §2.1
-2. **跑 aggregate 重新生成基础三表**：
+2. **跑 aggregate 重新生成基础三表**（v10 后默认 include = `^(roadscene|m3fd|msyn)_v\d`，无需手传 `--include`）：
     ```bash
+    # 本地 Windows PowerShell:
+    & "$env:USERPROFILE\miniconda3\envs\eff_loftr\python.exe" `
+        MyScripts\read_tb_metrics.py aggregate `
+        --out results\tb_summary_raw.md
+
     # 本地 Windows cmd:
     %USERPROFILE%\miniconda3\envs\eff_loftr\python.exe ^
         MyScripts\read_tb_metrics.py aggregate ^
         --out results\tb_summary_raw.md
+
     # 服务器 vlrlab:
     conda activate eloftr_yurupeng && \
         python MyScripts/read_tb_metrics.py aggregate \
         --out results/tb_summary_raw.md
     ```
+
+   如果需要临时扩展（如未来加 LLVIP）：PowerShell 写 `--include '^(roadscene|m3fd|msyn|llvip)_v\d'`（**单引号**包住，否则 `|` 被解析成管道）；cmd 直接用双引号 `"..."` 也可。
 3. **把 raw 三表内容贴进 `results/tb_summary.md` §1/§2/§3 替换对应行**：
     - **保留** `results/tb_summary.md` 顶部 intro、§4 联动表、§5 观察、§6 复现命令——这些是人工策展，**不**应被 raw 覆盖
     - 仅替换 §1/§2/§3 表格行（基础数字）
@@ -69,10 +77,14 @@ description: Single source-of-truth index for EfficientLoFTR cross-experiment tr
 
 | 项 | regex |
 |---|---|
-| include | `^(roadscene\|m3fd)_v\d` |
+| include | `^(roadscene\|m3fd\|msyn)_v\d` |
 | exclude | `(_debug\|_small\|_compat_test)` |
 
-未来添 LLVIP / KAIST / TNO 数据集训练时，include 改成 `^(roadscene\|m3fd\|llvip\|kaist\|tno)_v\d`，并回头改本节。
+历史扩展记录：
+- 2026-05-04 ~ 2026-05-07：v1..v9 时期 include = `^(roadscene\|m3fd)_v\d`（v1..v4 RoadScene + v5..v9 M3FD）
+- 2026-05-08（v10）：扩到 `^(roadscene\|m3fd\|msyn)_v\d`，新增 Megadepth_Syn 训练（exp_name `msyn_v10_ddp`）。**默认值已同步改 `MyScripts/read_tb_metrics.py:645`**，所以现在不传 `--include` 也能命中 v10。
+
+未来添 LLVIP / KAIST / TNO 数据集训练时，include 改成 `^(roadscene\|m3fd\|msyn\|llvip\|kaist\|tno)_v\d`，**同步改 `read_tb_metrics.py:645` 默认值 + 本节**。
 
 ### 2.2 版本号排序规则（aggregate 内置 + 本表行序）
 

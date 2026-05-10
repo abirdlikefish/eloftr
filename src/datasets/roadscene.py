@@ -22,6 +22,16 @@ Key design decisions (Solution A3 -- padding + mask):
   for narrow images). The same Homography matrix is then valid as
   ``homography_0to1`` in the padded coordinate frame because both IR and VIS
   share top-left padding alignment.
+- ``homography_dual`` (v11) extends the above to warp BOTH IR (image0) and
+  VIS (image1) by INDEPENDENT random Homographies ``H_ir`` and ``H_vis``.
+  The dataset returns ``homography_0to1 = H_vis @ inv(H_ir)``, which still
+  satisfies the contract "maps image0 px -> image1 px in the padded
+  coordinate frame" because both IR and VIS share top-left padding alignment
+  in their own warped frames. ``mask0`` is intersected with ``ir_valid``
+  (parallel to ``mask1`` & ``vis_valid``) so coarse cells warped from
+  outside the source IR rectangle are also marked invalid. Default
+  ``homography_dual=False`` is byte-identical to v0-v10 (only VIS warped,
+  ``ir_valid`` is all-True so the new ``mask0 &= ir_valid`` line is a no-op).
 - Validation/test default to ``homography_aug=False`` so metrics stay
   reproducible.
 - The dataset never returns ``depth0/depth1``, ``T_0to1/T_1to0`` or ``K0/K1``
@@ -179,11 +189,19 @@ class RoadSceneDataset(utils_data.Dataset):
         coarse_scale: Down-sampling factor used to produce coarse-scale
             ``mask0/mask1`` (typically ``1/8`` to match LoFTR coarse
             resolution).
-        homography_aug: Whether to apply a random Homography on VIS at train
-            time. Disabled at val/test for reproducible metrics.
-        homography_prob: Probability of applying the Homography per sample
-            when ``homography_aug`` is on.
-        homography_kwargs: Override kwargs forwarded to ``_random_homography``.
+        homography_aug: Whether to apply a random Homography at train time
+            (single-sided VIS-only by default; see ``homography_dual``).
+            Disabled at val/test for reproducible metrics.
+        homography_prob: Probability (one Bernoulli per sample) of firing
+            the Homography aug. When the gate fails, both H_ir and H_vis are
+            identity regardless of ``homography_dual`` so the no-aug code
+            path stays byte-identical to v0-v10.
+        homography_kwargs: Override kwargs forwarded to ``_random_homography``
+            (used for BOTH H_ir and H_vis when dual=True).
+        homography_dual: When True (v11), warp BOTH IR (image0) and VIS
+            (image1) by independent random Homographies; ``homography_0to1``
+            becomes ``H_vis @ inv(H_ir)``. When False (v0-v10 default), only
+            VIS is warped, identical to the historical pipeline.
     """
 
     def __init__(self,
@@ -200,6 +218,7 @@ class RoadSceneDataset(utils_data.Dataset):
                  homography_aug: bool = False,
                  homography_prob: float = 1.0,
                  homography_kwargs: Optional[dict] = None,
+                 homography_dual: bool = False,
                  augment_fn=None,
                  fp16: bool = False,
                  # v7_pcclahe knobs (all default to disabled = v0-v6.1 behaviour
@@ -249,6 +268,7 @@ class RoadSceneDataset(utils_data.Dataset):
         self.homography_aug = bool(homography_aug)
         self.homography_prob = float(homography_prob)
         self.homography_kwargs = dict(homography_kwargs) if homography_kwargs else {}
+        self.homography_dual = bool(homography_dual)
         self.augment_fn = augment_fn if mode == "train" else None
         self.fp16 = fp16
 
@@ -411,42 +431,75 @@ class RoadSceneDataset(utils_data.Dataset):
             ir_pc = cv2.resize(ir_pc_raw, (w0_r, h0_r))
             vis_pc = cv2.resize(vis_pc_raw, (w1_r, h1_r))
 
-        # 2. Optionally warp VIS *before* padding so the Homography is centred on
-        # the real VIS content rather than the padded canvas centre.
-        H_0to1 = np.eye(3, dtype=np.float32)
+        # 2. Optionally warp IR and/or VIS *before* padding so the Homography
+        # is centred on the real image content rather than the padded canvas
+        # centre. Single-sided mode (dual=False, v0-v10 default): only VIS is
+        # warped, identical to historical behaviour. Dual mode (v11): sample
+        # two independent H_ir/H_vis with the SAME shared probability gate
+        # (one Bernoulli per pair so identity and aug pairs stay clearly
+        # separated; never one-sided-only).
+        H_ir = np.eye(3, dtype=np.float32)
+        H_vis = np.eye(3, dtype=np.float32)
         if self.homography_aug and self.mode == "train":
             if np.random.rand() < self.homography_prob:
-                H_0to1 = _random_homography(h1_r, w1_r, **self.homography_kwargs)
-                vis = cv2.warpPerspective(vis, H_0to1, (w1_r, h1_r),
-                                          flags=cv2.INTER_LINEAR,
-                                          borderMode=cv2.BORDER_CONSTANT,
-                                          borderValue=0)
-                if self.use_edge_input:
-                    # Apply the SAME H to the VIS PC channel so PC and gray
-                    # remain pixel-aligned in image1.
-                    vis_pc = cv2.warpPerspective(vis_pc, H_0to1, (w1_r, h1_r),
-                                                 flags=cv2.INTER_LINEAR,
-                                                 borderMode=cv2.BORDER_CONSTANT,
-                                                 borderValue=0)
+                H_vis = _random_homography(h1_r, w1_r, **self.homography_kwargs)
+                if self.homography_dual:
+                    H_ir = _random_homography(h0_r, w0_r, **self.homography_kwargs)
 
-        # 3. Compute the post-warp VIS validity mask in the resized frame.
-        # A pixel is valid iff its source pixel (under H^-1) was inside the
-        # original (h1_r, w1_r) rectangle. We compute this by warping an
-        # all-ones mask with the same H using nearest-neighbour interpolation.
-        if not np.array_equal(H_0to1, np.eye(3, dtype=np.float32)):
-            ones = np.ones((h1_r, w1_r), dtype=np.uint8)
-            vis_valid = cv2.warpPerspective(ones, H_0to1, (w1_r, h1_r),
+        # Apply the warps. Skip cv2.warpPerspective when H is identity to
+        # avoid the (small) bilinear resample noise that would otherwise
+        # break v0-v10 byte-identical behaviour for the no-aug code path.
+        if not np.array_equal(H_vis, np.eye(3, dtype=np.float32)):
+            vis = cv2.warpPerspective(vis, H_vis, (w1_r, h1_r),
+                                      flags=cv2.INTER_LINEAR,
+                                      borderMode=cv2.BORDER_CONSTANT,
+                                      borderValue=0)
+            if self.use_edge_input:
+                vis_pc = cv2.warpPerspective(vis_pc, H_vis, (w1_r, h1_r),
+                                             flags=cv2.INTER_LINEAR,
+                                             borderMode=cv2.BORDER_CONSTANT,
+                                             borderValue=0)
+        if not np.array_equal(H_ir, np.eye(3, dtype=np.float32)):
+            ir = cv2.warpPerspective(ir, H_ir, (w0_r, h0_r),
+                                     flags=cv2.INTER_LINEAR,
+                                     borderMode=cv2.BORDER_CONSTANT,
+                                     borderValue=0)
+            if self.use_edge_input:
+                ir_pc = cv2.warpPerspective(ir_pc, H_ir, (w0_r, h0_r),
+                                            flags=cv2.INTER_LINEAR,
+                                            borderMode=cv2.BORDER_CONSTANT,
+                                            borderValue=0)
+
+        # 3. Per-modality post-warp validity masks. A pixel is valid iff its
+        # source pixel (under H^-1) was inside the original rectangle. We
+        # compute this by warping an all-ones mask with the same H using
+        # nearest-neighbour interpolation. ir_valid is all-True in single
+        # mode (H_ir==I), so the mask0 intersection below is a no-op for
+        # v0-v10 byte-identical behaviour.
+        if not np.array_equal(H_vis, np.eye(3, dtype=np.float32)):
+            ones1 = np.ones((h1_r, w1_r), dtype=np.uint8)
+            vis_valid = cv2.warpPerspective(ones1, H_vis, (w1_r, h1_r),
                                             flags=cv2.INTER_NEAREST,
                                             borderMode=cv2.BORDER_CONSTANT,
                                             borderValue=0).astype(bool)
         else:
             vis_valid = np.ones((h1_r, w1_r), dtype=bool)
+        if not np.array_equal(H_ir, np.eye(3, dtype=np.float32)):
+            ones0 = np.ones((h0_r, w0_r), dtype=np.uint8)
+            ir_valid = cv2.warpPerspective(ones0, H_ir, (w0_r, h0_r),
+                                           flags=cv2.INTER_NEAREST,
+                                           borderMode=cv2.BORDER_CONSTANT,
+                                           borderValue=0).astype(bool)
+        else:
+            ir_valid = np.ones((h0_r, w0_r), dtype=bool)
 
-        # 4. Zero-pad both images bottom-right to (pad_size, pad_size) and build
-        # the canvas-level masks. mask1 is intersected with vis_valid so cells
-        # warped from outside the source image are also marked invalid.
+        # 4. Zero-pad both images bottom-right to (pad_size, pad_size) and
+        # build the canvas-level masks. mask0 / mask1 are intersected with
+        # ir_valid / vis_valid so cells warped from outside their source
+        # rectangle are also marked invalid.
         ir_pad, mask0 = pad_bottom_right(ir, self.pad_size, ret_mask=True)
         vis_pad, mask1 = pad_bottom_right(vis, self.pad_size, ret_mask=True)
+        mask0[:h0_r, :w0_r] &= ir_valid
         mask1[:h1_r, :w1_r] &= vis_valid
 
         if self.use_edge_input:
@@ -499,7 +552,12 @@ class RoadSceneDataset(utils_data.Dataset):
         orig_scale1 = torch.tensor(
             [float(w1_raw) / float(w1_r), float(h1_raw) / float(h1_r)],
             dtype=torch.float32)
-        H_t = torch.from_numpy(H_0to1.astype(np.float32))
+        # GT mapping: image0 (warped IR) px -> image1 (warped VIS) px in
+        # the padded coordinate frame. Single-sided (H_ir=I): reduces to
+        # H_0to1 = H_vis (v0-v10 byte-identical). Dual: H_vis @ inv(H_ir).
+        H_0to1_np = (H_vis @ np.linalg.inv(H_ir)).astype(np.float32)
+        H_0to1_np /= H_0to1_np[2, 2]
+        H_t = torch.from_numpy(H_0to1_np)
 
         if self.fp16:
             image0 = image0.half()
