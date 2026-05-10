@@ -21,9 +21,9 @@ Checks (rationale in plan SS Risk与回滚):
 
   1. shape / dtype contract: image0/image1 (1 or 2, P, P) float32 in [0,1];
      mask0/mask1 bool (P/8, P/8); H_0to1 float32 (3,3) with det > 0.
-  2. dual aug fires:        avg ir_valid coverage <  0.95 (i.e., IR is being
-     warped, not all-True), confirming homography_dual=True wired through
-     to the dataset.
+  2. dual aug fires:        build a SECOND dataset with dual=False, same
+     index, same prob; mask0 coverage must drop by >= 0.05 vs dual mode,
+     confirming IR side is being warped (and the cfg flag wired through).
   3. covisibility floor:    avg per-pair (mask0 AND projected mask1) >= 0.30
      across 16 batches. Below 0.30 -> aug too aggressive, GT signal too thin.
   4. H composition correctness: independently sample H_ir, H_vis; verify
@@ -68,8 +68,8 @@ def parse_args() -> argparse.Namespace:
                    help="numpy + torch seed for reproducible spot-check")
     p.add_argument("--cov_min", type=float, default=0.30,
                    help="minimum per-pair covisibility (mask0 AND projected mask1)")
-    p.add_argument("--ir_warp_max", type=float, default=0.95,
-                   help="ir_valid coverage above this is suspicious -> dual aug not firing")
+    p.add_argument("--dual_delta_min", type=float, default=0.05,
+                   help="min absolute drop in mask0 coverage (single - dual) to confirm dual aug is firing")
     p.add_argument("--h_compose_tol_px", type=float, default=1.0,
                    help="H composition test: max sub-pixel residual after re-projection")
     return p.parse_args()
@@ -186,14 +186,39 @@ def check_shapes(sample: dict) -> tuple[bool, str]:
     return ok, ("; ".join(msgs) if msgs else "all shapes / dtypes / det / H[2,2] OK")
 
 
-def check_dual_aug_firing(samples: list[dict], ir_warp_max: float) -> tuple[bool, str]:
-    """If dual mode is wired through, IR side should also lose pixels to warp.
-    Average ir-side coverage (mask0.float().mean()) should be < ir_warp_max."""
-    covs = [float(s["mask0"].float().mean().item()) for s in samples]
-    avg = float(np.mean(covs))
-    ok = avg < ir_warp_max
-    return ok, (f"avg mask0 coverage = {avg:.3f} (threshold < {ir_warp_max} indicates IR "
-                f"side is being warped, i.e., dual mode firing)")
+def check_dual_aug_firing(ds_dual, ds_single, n_samples: int) -> tuple[bool, str]:
+    """Compare mask0 coverage between dual-mode and single-mode datasets on
+    the SAME indices (sample indices independent of np.random gate). Dual
+    must reduce mask0 coverage by at least 0.05 absolute on average,
+    otherwise dual aug is not firing on the IR side at all.
+
+    This avoids the false positive where non-square Megadepth_Syn images
+    naturally produce mask0 coverage 0.5-0.75 from padding alone (long_edge
+    480, narrow side ~256-352 after df-align), which would defeat a simple
+    "coverage < 0.95" threshold."""
+    # Force prob=1.0 on both datasets so aug always fires when enabled.
+    ds_dual.homography_prob = 1.0
+    ds_single.homography_prob = 1.0
+    # Same sample indices for both (deterministic spacing).
+    idxs = [(i * max(1, len(ds_dual) // n_samples)) % len(ds_dual) for i in range(n_samples)]
+    # Same RNG seed for both passes so sampled H_vis is identical between
+    # dual and single (the np.random.rand() gate + _random_homography fresh
+    # rng is OS-entropy seeded so this is best-effort, not byte-identity).
+    cov_dual_per = []
+    cov_single_per = []
+    for idx in idxs:
+        s_d = ds_dual[idx]
+        cov_dual_per.append(float(s_d["mask0"].float().mean().item()))
+    for idx in idxs:
+        s_s = ds_single[idx]
+        cov_single_per.append(float(s_s["mask0"].float().mean().item()))
+    avg_dual = float(np.mean(cov_dual_per))
+    avg_single = float(np.mean(cov_single_per))
+    delta = avg_single - avg_dual
+    ok = delta >= 0.05
+    return ok, (f"avg mask0 coverage: dual={avg_dual:.3f}, single={avg_single:.3f}, "
+                f"delta={delta:+.3f} (threshold delta >= 0.05 confirms dual aug is "
+                f"warping IR side)")
 
 
 def check_covisibility(samples: list[dict], cov_min: float) -> tuple[bool, str]:
@@ -316,8 +341,11 @@ def main() -> int:
     ok, msg = check_shapes(samples[0])
     results.append(("1. shape / dtype contract", ok, msg))
 
-    # 2. dual aug firing -- mask0 should not be all-True if dual=True.
-    ok, msg = check_dual_aug_firing(samples, args.ir_warp_max)
+    # 2. dual aug firing -- compare mask0 coverage between dual=True and
+    # dual=False on the same sample indices. Dual must reduce coverage by
+    # at least dual_delta_min.
+    ds_single = _build_dataset(cfg, mode="train", homography_dual_override=False)
+    ok, msg = check_dual_aug_firing(ds, ds_single, n_samples=min(8, args.n_samples))
     results.append(("2. dual aug firing on IR side", ok, msg))
 
     # 3. covisibility floor.
