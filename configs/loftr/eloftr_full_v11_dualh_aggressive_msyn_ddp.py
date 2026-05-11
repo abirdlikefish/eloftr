@@ -1,6 +1,8 @@
 """v11 = v10_msyn_ddp + dual-side aggressive Homography augmentation.
 
-Inherits v10_msyn_ddp byte-identical except for the 5 fields below:
+Inherits v10_msyn_ddp byte-identical except for the 4 cfg fields below
+(plus exp_name which is passed via CLI --exp_name, NOT set on cfg, see
+NOTE near the bottom of this file):
 
   DATASET.ROAD_HOMOGRAPHY_DUAL    : False -> True   (warp BOTH IR and VIS)
   DATASET.ROAD_HOMOGRAPHY_PROB    : 1.0   -> 0.7    (30% pair stays identity)
@@ -10,7 +12,9 @@ Inherits v10_msyn_ddp byte-identical except for the 5 fields below:
   TRAINER.WARMUP_STEP             : 450   -> 900    (actual 1800 -> 3600 step,
                                                      ~0.5 ep, defensive ramp
                                                      under aug-shocked cold start)
-  TRAINER.EXP_NAME                : msyn_v10_ddp -> msyn_v11_dualh_aggressive_ddp
+
+CLI arg (in MyScripts/run_msyn_v11_dualh_ddp.sh):
+  --exp_name=msyn_v11_dualh_aggressive_ddp
 
 What stays IDENTICAL to v10_msyn_ddp (do not override here):
 
@@ -75,4 +79,8 @@ cfg.DATASET.ROAD_HOMOGRAPHY_KWARGS.persp_ratio = 0.08
 
 cfg.TRAINER.WARMUP_STEP = 900   # v10 was 450 (~0.25 ep); doubled for cold start under aggressive aug shock
 
-cfg.TRAINER.EXP_NAME = "msyn_v11_dualh_aggressive_ddp"
+# NOTE: exp_name is passed via CLI --exp_name in MyScripts/run_msyn_v11_dualh_ddp.sh,
+# NOT set on cfg. TRAINER.EXP_NAME is not a registered field in src/config/default.py
+# (matches v10_msyn_ddp.py which also delegates exp_name to the CLI). Setting it on
+# cfg here would raise KeyError("Non-existent config key: TRAINER.EXP_NAME") in
+# YACS strict mode at config.merge_from_file() time.

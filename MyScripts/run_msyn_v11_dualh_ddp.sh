@@ -7,7 +7,11 @@
 # Diff vs run_msyn_v10_ddp.sh:
 #   - main_cfg_path : eloftr_full_v10_msyn_ddp.py
 #                  -> eloftr_full_v11_dualh_aggressive_msyn_ddp.py
+#                  (4 cfg overrides inside: DUAL=True, PROB=0.7, KWARGS=aggressive,
+#                   WARMUP_STEP=900; see cfg docstring for full list)
 #   - --exp_name   : msyn_v10_ddp -> msyn_v11_dualh_aggressive_ddp
+#                  (exp_name comes from CLI here, NOT set on cfg, because
+#                   TRAINER.EXP_NAME is not registered in src/config/default.py)
 #   ALL OTHER ARGS (gpus / batch / workers / max_ep / disable_mp / thr) IDENTICAL.
 #
 # Usage:
