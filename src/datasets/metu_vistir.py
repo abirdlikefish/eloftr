@@ -177,12 +177,20 @@ class METUVisTIRDataset(utils_data.Dataset):
         # Eager-load the npz once; copy out arrays so the file handle is
         # closed before DataLoader workers fork (np.load with allow_pickle
         # leaves a lazy NpzFile that doesn't pickle reliably across spawn).
-        with np.load(npz_path, allow_pickle=True) as f:
+        #
+        # NpzFile.__enter__ requires numpy >= 1.15; server PyTorch 1.12.1
+        # ships an older numpy that lacks __enter__ (AttributeError: __enter__).
+        # Use try/finally for cross-numpy compat (same pattern as LoFTR
+        # upstream src/datasets/megadepth.py L48).
+        f = np.load(npz_path, allow_pickle=True)
+        try:
             self._image_paths = f['image_paths'].copy()           # (N_img, 2) str
             self._intrinsics = f['intrinsics'].copy()             # (N_img, 2, 3, 3)
             self._distortion_coefs = f['distortion_coefs'].copy() # (N_img, 2, 8)
             self._poses = f['poses'].copy()                       # (N_img, 4, 4)
             self._pair_infos = f['pair_infos'].copy()             # (N_pair, 2) object
+        finally:
+            f.close()
 
         # v7+ pcclahe knobs (R2 lazy CLAHE init for worker-pickle safety).
         self.use_edge_input = bool(use_edge_input)
