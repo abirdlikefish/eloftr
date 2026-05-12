@@ -282,6 +282,14 @@ _CN.DATASET.METU_UNDISTORT = True   # cv2.undistort with 8-coef OpenCV model
 _CN.DATASET.METU_SIDE0 = 'thermal'
 _CN.DATASET.METU_SIDE1 = 'vis'
 
+# Megadepth_Syn_Pose (v13) options. Only consulted when TRAINVAL_DATA_SOURCE
+# == 'Megadepth_Syn_Pose' (cross-view + cross-modal pose-supervised training
+# on LoFTR scene_info_0.1_0.7 + Megadepth_Syn IR/VIS assets). 'ir2vis' is
+# the only mode used by v13a main run; 'vis2vis' is reserved for future
+# RGB-RGB cross-view in-domain ceiling ablation (same dispatch + supervision
+# pipeline, only the modality of image0 changes).
+_CN.DATASET.MSYN_POSE_CROSS_MODAL_MODE = 'ir2vis'
+
 _CN.DATASET.NPE_NAME = None
 
 ##############  Trainer  ##############

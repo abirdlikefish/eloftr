@@ -76,6 +76,12 @@ def parse_args() -> argparse.Namespace:
                    help="Directory for figures/, summary.csv, overall.txt.")
     p.add_argument("--max_pairs", type=int, default=0,
                    help="0 = full set; otherwise stop after N pairs.")
+    p.add_argument("--stride", type=int, default=1,
+                   help="Sub-sample dataset by stride. Default 1 = full. >1 takes every "
+                        "Nth pair so all npz scenes are touched but the total shrinks "
+                        "to ~1/stride. e.g. stride=10 on all subset: 2590 -> ~259 pair "
+                        "(~10x faster). NOTE: auc@5/10/20 under stride > 1 is only a "
+                        "directional preview; cross-version results entries require stride=1.")
     p.add_argument("--max_figs", type=int, default=10,
                    help="Cap saved figure count (0 = none even if save_figures).")
     p.add_argument("--no_save_figures", dest="save_figures",
@@ -90,7 +96,30 @@ def parse_args() -> argparse.Namespace:
                    help="Per-pair RANSAC restarts; aggregate_metrics' max(R, t) is "
                         "computed over all restarts. Higher = more robust auc.")
     p.add_argument("--thr", type=float, default=0.1,
-                   help="LOFTR.MATCH_COARSE.THR override (default 0.1 matches v0..v11 eval).")
+                   help="LOFTR.MATCH_COARSE.THR override (default 0.1 matches v0..v11 eval; "
+                        "official outdoor.ckpt AUC reproduction also uses 0.1, NOT cfg's "
+                        "comment-recommended 0.2 -- see scripts/reproduce_test/outdoor_full_auc.sh).")
+    p.add_argument("--megasize", type=int, default=None,
+                   help="Override cfg.DATASET.MGDPT_IMG_RESIZE (long-edge resize). "
+                        "Default None = keep cfg value (832 for METU). Official outdoor "
+                        "AUC reproduction uses 1152 (--megasize 1152). For METU's 4K VIS "
+                        "this gives ~3.3x downsample instead of ~4.6x, preserving more "
+                        "texture for cross-modal matching. Mirrors test.py --megasize.")
+    p.add_argument("--npe", action="store_true", default=False,
+                   help="Enable NPE (Neural Position Encoding) extrapolation for ROPE. "
+                        "When set: NPE = [832, 832, MGDPT_IMG_RESIZE, MGDPT_IMG_RESIZE], "
+                        "telling RoPE that training was at 832 long-edge but testing is "
+                        "at MGDPT_IMG_RESIZE. MUST be paired with --megasize when "
+                        "MGDPT_IMG_RESIZE != 832, otherwise RoPE frequencies misalign. "
+                        "Mirrors test.py --npe.")
+    p.add_argument("--metu_side0", default=None, choices=[None, "vis", "thermal"],
+                   help="Override cfg.DATASET.METU_SIDE0 (which modality goes into image0 "
+                        "slot). Default None = keep cfg value. v10/v11/v12 finetuned ckpts "
+                        "with modemb_ir bound to image0 require 'thermal'; official "
+                        "outdoor.ckpt (no modemb) empirically prefers 'vis' (~4x higher AUC).")
+    p.add_argument("--metu_side1", default=None, choices=[None, "vis", "thermal"],
+                   help="Override cfg.DATASET.METU_SIDE1. Must differ from --metu_side0 "
+                        "(cross-modal eval requires both sides used).")
     p.add_argument("--device", default="cuda")
     p.add_argument("--num_workers", type=int, default=2)
     return p.parse_args()
@@ -104,8 +133,42 @@ def build_config(args: argparse.Namespace):
     cfg.merge_from_file(args.main_cfg)
     cfg.merge_from_file(args.data_cfg)
 
-    if cfg.LOFTR.COARSE.NPE is None:
+    # --megasize override (mirrors test.py:94-95). MUST happen BEFORE the
+    # --npe block below because NPE consumes MGDPT_IMG_RESIZE.
+    if args.megasize is not None:
+        cfg.DATASET.MGDPT_IMG_RESIZE = int(args.megasize)
+
+    # --npe handling (mirrors test.py:97-106). When set, NPE is computed
+    # from the (now possibly overridden) MGDPT_IMG_RESIZE so RoPE knows
+    # it was trained at 832 long-edge but is being tested at a different
+    # resolution. When NOT set, fall back to the legacy [832,832,832,832]
+    # default that matches v0..v11 eval bytes-identically.
+    if args.npe:
+        if cfg.LOFTR.COARSE.ROPE:
+            assert cfg.DATASET.NPE_NAME is not None, \
+                "--npe requires cfg.DATASET.NPE_NAME (set in metu_vistir_test_*.py)"
+        if cfg.DATASET.NPE_NAME == 'megadepth':
+            cfg.LOFTR.COARSE.NPE = [832, 832,
+                                    cfg.DATASET.MGDPT_IMG_RESIZE,
+                                    cfg.DATASET.MGDPT_IMG_RESIZE]
+        elif cfg.DATASET.NPE_NAME == 'scannet':
+            cfg.LOFTR.COARSE.NPE = [832, 832,
+                                    cfg.DATASET.SCAN_IMG_RESIZEX,
+                                    cfg.DATASET.SCAN_IMG_RESIZEX]
+    elif cfg.LOFTR.COARSE.NPE is None:
         cfg.LOFTR.COARSE.NPE = [832, 832, 832, 832]
+
+    # --metu_side0 / --metu_side1 override (cross-modal eval side selection).
+    # v10/v11/v12 finetuned ckpts: keep cfg default 'thermal'/'vis' (modemb_ir
+    # bound to image0). Official outdoor.ckpt: pass 'vis'/'thermal' for ~4x
+    # higher AUC (no modemb so the empirically better side wins).
+    if args.metu_side0 is not None:
+        cfg.DATASET.METU_SIDE0 = str(args.metu_side0)
+    if args.metu_side1 is not None:
+        cfg.DATASET.METU_SIDE1 = str(args.metu_side1)
+    if cfg.DATASET.METU_SIDE0 == cfg.DATASET.METU_SIDE1:
+        raise ValueError(f"METU_SIDE0 == METU_SIDE1 == {cfg.DATASET.METU_SIDE0!r}; "
+                         f"cross-modal eval requires different sides.")
 
     # Force fp32 path so test-time numerics match training validation.
     cfg.LOFTR.MP = False
@@ -268,11 +331,21 @@ def _save_metu_pair_figure(out_path: Path, batch: dict, epi_errs: np.ndarray,
 
     rel0 = batch['pair_names'][0][0]
     rel1 = batch['pair_names'][1][0]
+    # Per-pair AUC@5/10/20 deg hit indicator. AUC itself is dataset-aggregate
+    # (overall.txt) - on a single figure we can only show whether THIS pair's
+    # max(R, t) falls under each threshold (= contributes to AUC@N). ASCII
+    # 'OK' / '--' instead of unicode check / cross to avoid matplotlib font
+    # box-out on Windows default fonts.
+    pose_err = max(R_err, t_err)
+    tag5  = 'OK' if pose_err <= 5.0  else '--'
+    tag10 = 'OK' if pose_err <= 10.0 else '--'
+    tag20 = 'OK' if pose_err <= 20.0 else '--'
     text = [
         f'ckpt: {ckpt_name}',
         f'#Matches {len(kpts0)}',
         f'Prec@{conf_thr:.0e}: {100 * precision:.1f}% ({n_correct}/{len(kpts0)})',
-        f'R_err={R_err:6.2f}  t_err={t_err:6.2f}  inliers={n_inl}',
+        f'R_err={R_err:6.2f} deg  t_err={t_err:6.2f} deg  inliers={n_inl}',
+        f'pose_err=max(R,t)={pose_err:6.2f} deg    AUC5: {tag5}    AUC10: {tag10}    AUC20: {tag20}',
         f'{Path(rel0).name}  vs  {Path(rel1).name}',
     ]
     fig = make_matching_figure(img0, img1, kpts0_vis, kpts1_vis, color, text=text)
@@ -300,11 +373,20 @@ def main() -> None:
     cfg = build_config(args)
     matcher = build_matcher(cfg, ckpt_path, args.device)
     dataset = build_dataset(cfg, args)
+    full_len = len(dataset)
+
+    if args.stride > 1:
+        from torch.utils.data import Subset
+        selected = list(range(0, full_len, args.stride))
+        dataset = Subset(dataset, selected)
+        print(f"  stride={args.stride}: subsampled {len(dataset)}/{full_len} pairs "
+              f"(touches every npz scene; auc/prec are PREVIEW-only)",
+              flush=True)
 
     n_total = len(dataset)
     if args.max_pairs > 0:
         n_total = min(n_total, args.max_pairs)
-    print(f"Evaluating {n_total} pairs (full dataset = {len(dataset)}) with ckpt={ckpt_path}",
+    print(f"Evaluating {n_total} pairs (full dataset = {full_len}) with ckpt={ckpt_path}",
           flush=True)
     print(f"  main_cfg : {args.main_cfg}", flush=True)
     print(f"  data_cfg : {args.data_cfg}", flush=True)
@@ -378,6 +460,7 @@ def main() -> None:
 
         mconf = batch['mconf'].detach().cpu().numpy() if 'mconf' in batch \
                 else np.zeros(0)
+        pose_err_best = float(max(R_best, t_best))
         per = {
             'scene_id': scene_id,
             'pair_id': pair_id,
@@ -392,6 +475,15 @@ def main() -> None:
             'R_err_best': float(R_best),
             't_err_best': float(t_best),
             'inliers_best': int(inl_best.sum()),
+            # Per-pair AUC@5/10/20 deg hit indicators. AUC itself is a
+            # dataset-level aggregate (computed in overall.txt via
+            # aggregate_metrics); the per-pair correct@Ndeg = 1 iff this
+            # pair's max(R_err, t_err) <= N deg, i.e. the pair contributes
+            # to AUC@N. inf <= N is naturally False (counts as miss).
+            'pose_err_best': pose_err_best,
+            'correct@5deg':  int(pose_err_best <= 5.0),
+            'correct@10deg': int(pose_err_best <= 10.0),
+            'correct@20deg': int(pose_err_best <= 20.0),
         }
         rows.append(per)
 
@@ -409,6 +501,8 @@ def main() -> None:
               f"matches={per['num_matches']:4d}  "
               f"epi_med={per['epi_err_median']:.2e}  "
               f"R={per['R_err_best']:6.2f}  t={per['t_err_best']:6.2f}  "
+              f"pose={per['pose_err_best']:6.2f}  "
+              f"hit5={per['correct@5deg']} hit10={per['correct@10deg']} hit20={per['correct@20deg']}  "
               f"prec@5e-4={100 * per['prec@5e-04']:5.1f}%",
               flush=True)
 

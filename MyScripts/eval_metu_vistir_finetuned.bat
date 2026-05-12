@@ -278,7 +278,37 @@ set "RANSAC_FLAG=--ransac RANSAC --ransac_thr 2.0 --ransac_times 5"
 REM Cap on saved figures per subset (set 0 to disable figures entirely).
 set "MAX_FIGS=10"
 
-for %%S in (all cloudy_cloudy cloudy_sunny) do (
+REM ====================================================================
+REM  SUBSETS: 想跑哪几个子集就留哪几个; 直接改这一行
+REM     all           : 2590 pair (10 npz)
+REM     cloudy_cloudy : 1382 pair (6 npz, 同光照, 较易)
+REM     cloudy_sunny  : 1208 pair (4 npz, 跨光照, 最难)
+REM
+REM  例:
+REM     set "SUBSETS=all cloudy_cloudy cloudy_sunny"   REM 全部 (默认, 完整 eval)
+REM     set "SUBSETS=cloudy_cloudy"                    REM 只同光照
+REM     set "SUBSETS=cloudy_sunny"                     REM 只跨光照
+REM     set "SUBSETS=all"                              REM 只跑 all
+REM ====================================================================
+set "SUBSETS=all cloudy_cloudy cloudy_sunny"
+
+REM ====================================================================
+REM  STRIDE: 步长抽样, 加速 smoke / sanity test
+REM     1   : 完整跑 (默认, 生产/正式 eval 用)
+REM     10  : 每 10 对取 1 对 (~259/2590, ~10x 加速, 覆盖所有 scene)
+REM     50  : 每 50 对取 1 对 (~52 pair, 极速 sanity check)
+REM  注: STRIDE > 1 时 auc@5/10/20 数字仅供方向性预览, 跨版本对比仍需 STRIDE=1
+REM ====================================================================
+set "STRIDE=1"
+
+REM ====================================================================
+REM  THR=0.2 警告: 训练侧 ModelCheckpoint monitor 用 THR=0.1 算 prec@1/3/5px
+REM  挑 best.ckpt; eval 端用 THR=0.2 后, 此处的 auc/prec 数字将和 ckpt
+REM  选择口径脱钩, 也无法直接对比 results/eval_summary.md §6 中按 THR=0.1
+REM  跑出的历史数字。如果想严格做跨版本对比, 改回 --thr 0.1。
+REM ====================================================================
+
+for %%S in (%SUBSETS%) do (
     set "SUB=%%S"
     set "SUB_OUT=!OUT_DIR!\!SUB!"
     if not exist "!SUB_OUT!" mkdir "!SUB_OUT!"
@@ -298,7 +328,8 @@ for %%S in (all cloudy_cloudy cloudy_sunny) do (
       --out_dir "!SUB_OUT!" ^
       !RANSAC_FLAG! ^
       --max_figs !MAX_FIGS! ^
-      --thr 0.1 ^
+      --thr 0.2 ^
+      --stride !STRIDE! ^
       --num_workers 8
 
     if errorlevel 1 (
@@ -311,7 +342,7 @@ for %%S in (all cloudy_cloudy cloudy_sunny) do (
 echo.
 echo ============================================================
 echo  All METU subsets finished. Summary:
-for %%S in (all cloudy_cloudy cloudy_sunny) do (
+for %%S in (%SUBSETS%) do (
     echo   !OUT_DIR!\%%S\overall.txt
 )
 echo ============================================================

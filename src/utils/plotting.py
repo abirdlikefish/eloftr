@@ -12,7 +12,8 @@ def _compute_conf_thresh(data):
     dataset_name = data['dataset_name'][0].lower()
     if dataset_name == 'scannet':
         thr = 5e-4
-    elif dataset_name == 'megadepth':
+    elif dataset_name in ('megadepth', 'megadepth_syn_pose'):
+        # v13 (Megadepth_Syn_Pose) shares MegaDepth's epi-error contract.
         thr = 1e-4
     elif is_aligned_irvis(dataset_name):
         # interpreted as a pixel threshold for the visualization colormap

@@ -251,7 +251,10 @@ def spvs_coarse_roadscene(data, config):
 def compute_supervision_coarse(data, config):
     assert len(set(data['dataset_name'])) == 1, "Do not support mixed datasets training!"
     data_source = data['dataset_name'][0]
-    if data_source.lower() in ['scannet', 'megadepth']:
+    if data_source.lower() in ['scannet', 'megadepth', 'megadepth_syn_pose']:
+        # v13 (Megadepth_Syn_Pose): cross-view cross-modal pose supervision
+        # shares the same K + W2C pose + depth GT contract as MegaDepth, so it
+        # routes to spvs_coarse, NOT spvs_coarse_roadscene.
         spvs_coarse(data, config)
     elif is_aligned_irvis(data_source):
         spvs_coarse_roadscene(data, config)
@@ -500,7 +503,8 @@ def spvs_fine_roadscene(data, config, logger=None):
 
 def compute_supervision_fine(data, config, logger=None):
     data_source = data['dataset_name'][0]
-    if data_source.lower() in ['scannet', 'megadepth']:
+    if data_source.lower() in ['scannet', 'megadepth', 'megadepth_syn_pose']:
+        # v13: see comment in compute_supervision_coarse above.
         spvs_fine(data, config, logger)
     elif is_aligned_irvis(data_source):
         spvs_fine_roadscene(data, config, logger)

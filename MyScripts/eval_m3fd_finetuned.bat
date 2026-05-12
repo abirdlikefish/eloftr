@@ -40,8 +40,16 @@ REM              (auto-glob with the same sub-version skip filter; X=6 picks
 REM               v6_finetune.py and ignores v6_1_finetune.py, X=6_1 picks
 REM               v6_1_finetune.py)
 REM
-REM  Output dir: dump\m3fd_eval_v<X>_version<Y>_<topZ|last>
-REM              (e.g. dump\m3fd_eval_v6_1_version0_top1)
+REM  Output dir: dump\m3fd_eval_v<X>_version<Y>_<topZ|last>_dualh
+REM              (e.g. dump\m3fd_eval_v6_1_version0_top1_dualh)
+REM              The _dualh suffix marks the new default: dual-side
+REM              Homography aug (warp both IR and VIS, matching v11
+REM              training), fixed seed=123 for reproducibility. Historical
+REM              no-aug eval dirs (without _dualh) are preserved untouched.
+REM              To restore the legacy no-aug behaviour, remove the trailing
+REM              --apply_homography --homography_dual --seed 123 flags from
+REM              the python invocation near the bottom of this file (and
+REM              drop the _dualh suffix from OUT_DIR).
 REM
 REM  Examples:
 REM    eval_m3fd_finetuned.bat 5              -> v5 m3fd-trained, in-domain test
@@ -246,9 +254,10 @@ if not exist "!FT_CFG!" (
     exit /b 1
 )
 
-REM Unified OUT_DIR naming: dump\m3fd_eval_v<X>_version<Y>_<Z_TAG>.
+REM Unified OUT_DIR naming: dump\m3fd_eval_v<X>_version<Y>_<Z_TAG>_dualh.
 REM X is already normalised to underscore form (6_1) so dirs are stable.
-set "OUT_DIR=dump\m3fd_eval_v!X!_version!Y!_!Z_TAG!"
+REM _dualh suffix marks dual-side H aug + fixed seed (see header note).
+set "OUT_DIR=dump\m3fd_eval_v!X!_version!Y!_!Z_TAG!_dualh"
 
 REM ---- M3FD test split ----------------------------------------------------
 set "M3FD_DATA_CFG=configs\data\m3fd_trainval.py"
@@ -284,7 +293,10 @@ python MyScripts\eval_roadscene.py ^
   --data_cfg "!M3FD_DATA_CFG!" ^
   --list_path "!M3FD_TEST_LIST!" ^
   --out_dir "!OUT_DIR!" ^
-  --thr 0.1
+  --thr 0.1 ^
+  --apply_homography ^
+  --homography_dual ^
+  --seed 123
 
 endlocal
 pause

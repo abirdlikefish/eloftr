@@ -202,6 +202,14 @@ class RoadSceneDataset(utils_data.Dataset):
             (image1) by independent random Homographies; ``homography_0to1``
             becomes ``H_vis @ inv(H_ir)``. When False (v0-v10 default), only
             VIS is warped, identical to the historical pipeline.
+        homography_seed: When non-None, the per-pair random Homography is
+            drawn from ``np.random.default_rng(homography_seed + idx)`` so
+            every (pair_id, ckpt) combination receives a deterministic H
+            sequence. Used by eval scripts (``MyScripts/eval_roadscene.py``)
+            to make dual-H eval numbers reproducible across runs and
+            comparable across ckpts. When ``None`` (default) the legacy
+            ``np.random``-global path is taken, byte-identical to v0-v11
+            training (training never sets this kwarg).
     """
 
     def __init__(self,
@@ -219,6 +227,7 @@ class RoadSceneDataset(utils_data.Dataset):
                  homography_prob: float = 1.0,
                  homography_kwargs: Optional[dict] = None,
                  homography_dual: bool = False,
+                 homography_seed: Optional[int] = None,
                  augment_fn=None,
                  fp16: bool = False,
                  # v7_pcclahe knobs (all default to disabled = v0-v6.1 behaviour
@@ -269,6 +278,11 @@ class RoadSceneDataset(utils_data.Dataset):
         self.homography_prob = float(homography_prob)
         self.homography_kwargs = dict(homography_kwargs) if homography_kwargs else {}
         self.homography_dual = bool(homography_dual)
+        # Eval-time reproducibility hook: when set, __getitem__ draws H from
+        # np.random.default_rng(homography_seed + idx) instead of np.random
+        # globals. Training never passes this (src/lightning/data.py doesn't
+        # plumb it), so the training distribution stays byte-identical.
+        self.homography_seed = None if homography_seed is None else int(homography_seed)
         self.augment_fn = augment_fn if mode == "train" else None
         self.fp16 = fp16
 
@@ -544,10 +558,24 @@ class RoadSceneDataset(utils_data.Dataset):
         H_ir = np.eye(3, dtype=np.float32)
         H_vis = np.eye(3, dtype=np.float32)
         if self.homography_aug and self.mode == "train":
-            if np.random.rand() < self.homography_prob:
-                H_vis = _random_homography(h1_r, w1_r, **self.homography_kwargs)
+            # Two RNG paths share the same algorithm and probability gate; the
+            # seeded path makes every (pair_id, seed) combination land on the
+            # same H matrix so eval numbers are reproducible across runs and
+            # comparable across ckpts (multi-ckpt sees the same H sequence).
+            # The unseeded path is the legacy v0-v11 training path:
+            # np.random.rand() honours the global seed while
+            # _random_homography(rng=None) draws a fresh default_rng() per
+            # call (intentional: keeps training byte-identical to pre-patch).
+            if self.homography_seed is not None:
+                rng = np.random.default_rng(self.homography_seed + idx)
+                fired = rng.random() < self.homography_prob
+            else:
+                rng = None
+                fired = np.random.rand() < self.homography_prob
+            if fired:
+                H_vis = _random_homography(h1_r, w1_r, rng=rng, **self.homography_kwargs)
                 if self.homography_dual:
-                    H_ir = _random_homography(h0_r, w0_r, **self.homography_kwargs)
+                    H_ir = _random_homography(h0_r, w0_r, rng=rng, **self.homography_kwargs)
 
         # Apply the warps. Skip cv2.warpPerspective when H is identity to
         # avoid the (small) bilinear resample noise that would otherwise

@@ -25,6 +25,7 @@ from src.utils.misc import tqdm_joblib
 from src.utils import comm
 from src.utils.data_source import is_aligned_irvis
 from src.datasets.megadepth import MegaDepthDataset
+from src.datasets.megadepth_syn_pose import MegadepthSynPoseDataset
 from src.datasets.scannet import ScanNetDataset
 from src.datasets.roadscene import RoadSceneDataset
 from src.datasets.metu_vistir import METUVisTIRDataset
@@ -111,6 +112,12 @@ class MultiSceneDataModule(pl.LightningDataModule):
         self.metu_undistort = getattr(config.DATASET, 'METU_UNDISTORT', True)
         self.metu_side0 = getattr(config.DATASET, 'METU_SIDE0', 'vis')
         self.metu_side1 = getattr(config.DATASET, 'METU_SIDE1', 'thermal')
+
+        # Megadepth_Syn_Pose (v13) options. Defaults match the dataset class
+        # signature so v0..v12 cfgs that don't set them stay byte-identical
+        # (the field being absent on cfg.DATASET still resolves via getattr).
+        self.msyn_pose_cross_modal_mode = getattr(
+            config.DATASET, 'MSYN_POSE_CROSS_MODAL_MODE', 'ir2vis')
 
         self.fp16 = config.DATASET.FP16
 
@@ -341,7 +348,9 @@ class MultiSceneDataModule(pl.LightningDataModule):
         datasets = []
         augment_fn = self.augment_fn if mode == 'train' else None
         data_source = self.trainval_data_source if mode in ['train', 'val'] else self.test_data_source
-        if str(data_source).lower() == 'megadepth':
+        if str(data_source).lower() in ('megadepth', 'megadepth_syn_pose'):
+            # v13: list files store stem '<scene>_<lo>_<hi>' without .npz suffix
+            # (matches LoFTR convention; see configs/data/megadepth_trainval_832.py).
             npz_names = [f'{n}.npz' for n in npz_names]
         for npz_name in tqdm(npz_names,
                              desc=f'[rank:{self.rank}] loading {mode} datasets',
@@ -397,6 +406,27 @@ class MultiSceneDataModule(pl.LightningDataModule):
                         clahe_tile_size=self.clahe_tile_size,
                         fp16=self.fp16,
                     ))
+            elif str(data_source).lower() == 'megadepth_syn_pose':
+                # v13 Megadepth_Syn_Pose: cross-view + cross-modal pose-supervised
+                # training on LoFTR official scene_info_0.1_0.7 + Megadepth_Syn
+                # IR/VIS image assets. Same per-npz-per-scene wrapping as
+                # MegaDepth; dataset_name='Megadepth_Syn_Pose' so dispatch
+                # in supervision.py routes to spvs_coarse (pose-based).
+                datasets.append(
+                    MegadepthSynPoseDataset(
+                        root_dir=data_root,
+                        npz_path=npz_path,
+                        mode=mode,
+                        min_overlap_score=min_overlap_score,
+                        img_resize=self.mgdpt_img_resize,
+                        df=self.mgdpt_df,
+                        img_padding=self.mgdpt_img_pad,
+                        depth_padding=self.mgdpt_depth_pad,
+                        augment_fn=augment_fn,
+                        coarse_scale=self.coarse_scale,
+                        cross_modal_mode=self.msyn_pose_cross_modal_mode,
+                        fp16=self.fp16,
+                    ))
             else:
                 raise NotImplementedError()
         return ConcatDataset(datasets)
@@ -413,7 +443,9 @@ class MultiSceneDataModule(pl.LightningDataModule):
     ):
         augment_fn = self.augment_fn if mode == 'train' else None
         data_source = self.trainval_data_source if mode in ['train', 'val'] else self.test_data_source
-        if str(data_source).lower() == 'megadepth':
+        if str(data_source).lower() in ('megadepth', 'megadepth_syn_pose'):
+            # v13: list files store stem '<scene>_<lo>_<hi>' without .npz suffix
+            # (matches LoFTR convention; see configs/data/megadepth_trainval_832.py).
             npz_names = [f'{n}.npz' for n in npz_names]
         with tqdm_joblib(tqdm(desc=f'[rank:{self.rank}] loading {mode} datasets',
                               total=len(npz_names), disable=int(self.rank) != 0)):

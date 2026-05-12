@@ -36,10 +36,14 @@ ckpt -- mismatch only shows up as ``missing_keys`` warnings on load.
 
 The legacy ``--apply_homography`` flag still works: it switches the
 dataset to ``mode='train'`` so the train-time Homography augmentation
-fires. ``np.random.seed`` is called once with ``--seed`` for partial
-reproducibility (full reproducibility is hard because every worker
-re-seeds; we therefore force ``num_workers=0`` whenever Homography aug
-is requested).
+fires. By default eval now mirrors v11 training: BOTH IR and VIS are
+warped (``--homography_dual``, can be force-off with
+``--no_homography_dual``; default ``None`` lets the cfg's
+``ROAD_HOMOGRAPHY_DUAL`` decide). For full reproducibility the dataset
+draws H from ``np.random.default_rng(seed + pair_id)`` (threaded via
+``homography_seed=args.seed``) so identical commands produce identical
+``overall.txt``. We still force ``num_workers=0`` whenever Homography
+aug is requested to keep dataloader ordering deterministic.
 """
 from __future__ import annotations
 
@@ -86,8 +90,23 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--apply_homography", action="store_true",
                    help="Run dataset in train-mode so the random Homography "
                         "augmentation fires. Default: off (matches training val).")
+    # Tri-state --homography_dual: True / False / None (=cfg default).
+    # argparse can't natively do that with a single --flag, so we use a pair of
+    # store_const flags that share `dest='homography_dual'`. Default stays
+    # None so omitting both flags hands the decision back to cfg.
+    p.add_argument("--homography_dual", dest="homography_dual", action="store_const",
+                   const=True, default=None,
+                   help="Force dual-side H aug (warp both IR and VIS, v11-style). "
+                        "Overrides cfg.DATASET.ROAD_HOMOGRAPHY_DUAL.")
+    p.add_argument("--no_homography_dual", dest="homography_dual", action="store_const",
+                   const=False,
+                   help="Force single-side H aug (warp VIS only, v0-v10 legacy). "
+                        "Overrides cfg.DATASET.ROAD_HOMOGRAPHY_DUAL.")
     p.add_argument("--seed", type=int, default=123,
-                   help="np.random seed used when --apply_homography is set.")
+                   help="Seed for per-pair Homography RNG (used when "
+                        "--apply_homography is set). H matrices are drawn from "
+                        "np.random.default_rng(seed + pair_id) so identical "
+                        "commands produce identical overall.txt.")
     p.add_argument("--thresholds", type=float, nargs="+", default=[1.0, 3.0, 5.0])
     p.add_argument("--save_figures", action="store_true", default=True)
     p.add_argument("--no_save_figures", dest="save_figures", action="store_false")
@@ -173,12 +192,26 @@ def build_dataset(cfg, args: argparse.Namespace) -> RoadSceneDataset:
     if args.apply_homography:
         # Engage the dataset's train-time augmentation path. mode='train'
         # is required so the augment_fn / homography_aug branches are taken.
+        # Seeding is delegated to the dataset's per-pair RNG (homography_seed=
+        # args.seed below) rather than np.random.seed(); the global seed used
+        # to be a no-op for H matrices because _random_homography(rng=None)
+        # calls np.random.default_rng() which ignores np.random globals.
         mode = "train"
         homography_aug = True
-        np.random.seed(args.seed)
+        homography_seed = int(args.seed)
     else:
         mode = "val"
         homography_aug = False
+        homography_seed = None
+
+    # Tri-state --homography_dual: True / False / None (=cfg). When the user
+    # didn't pass either of the dual flags, fall back to cfg's
+    # ROAD_HOMOGRAPHY_DUAL (which is False for v0-v10 cfgs and True for
+    # v11/v12 cfgs). Explicit CLI overrides cfg.
+    if args.homography_dual is None:
+        homography_dual = bool(getattr(ds_cfg, "ROAD_HOMOGRAPHY_DUAL", False))
+    else:
+        homography_dual = bool(args.homography_dual)
 
     return RoadSceneDataset(
         root_dir=root,
@@ -193,6 +226,8 @@ def build_dataset(cfg, args: argparse.Namespace) -> RoadSceneDataset:
         homography_aug=homography_aug,
         homography_prob=getattr(ds_cfg, "ROAD_HOMOGRAPHY_PROB", 1.0),
         homography_kwargs=dict(getattr(ds_cfg, "ROAD_HOMOGRAPHY_KWARGS", {})),
+        homography_dual=homography_dual,
+        homography_seed=homography_seed,
         # v7_pcclahe knobs. Mirror src/lightning/data.py's pass-through so
         # eval_*_finetuned.bat 7 (v7 ckpt eval) builds a dataset with the
         # same 2-channel (gray + PC) + CLAHE pre-processing as training.
@@ -264,7 +299,8 @@ def _save_pair_figure(out_path: Path,
                       thresholds: List[float],
                       ckpt_name: str,
                       pair_name: str,
-                      apply_homography: bool):
+                      apply_homography: bool,
+                      homography_dual: bool = False):
     img0_crop, (r0_0, r1_0, c0_0, c1_0) = _crop_to_valid(batch["image0"][0], batch["mask0"][0])
     img1_crop, (r0_1, r1_1, c0_1, c1_1) = _crop_to_valid(batch["image1"][0], batch["mask1"][0])
     mkpts0 = batch["mkpts0_f"].detach().cpu().numpy()
@@ -298,12 +334,18 @@ def _save_pair_figure(out_path: Path,
     else:
         color = np.zeros((0, 4))
     p_at_3 = float((pixel_errs < 3.0).mean()) if len(pixel_errs) else 0.0
+    if not apply_homography:
+        h_aug_tag = "off"
+    elif homography_dual:
+        h_aug_tag = "dual"
+    else:
+        h_aug_tag = "single"
     text = [
         f"ckpt: {ckpt_name}",
         f"#Matches {len(mkpts0)} (in-canvas: {int(keep.sum())})",
         f"Mean px err: {float(pixel_errs.mean()) if len(pixel_errs) else 0.0:.2f}",
         f"P@3px: {100 * p_at_3:.1f}%",
-        f"H aug: {'on' if apply_homography else 'off'}",
+        f"H aug: {h_aug_tag}",
         pair_name,
     ]
     fig = make_matching_figure(img0_crop, img1_crop, mkpts0_v, mkpts1_v, color, text=text)
@@ -337,6 +379,11 @@ def main() -> None:
     print(f"  vis_dir  : {dataset.vis_dir}")
     print(f"  list     : {dataset.list_path}")
     print(f"  H aug    : {bool(args.apply_homography)}")
+    if args.apply_homography:
+        print(f"  H dual   : {bool(dataset.homography_dual)}")
+        print(f"  H seed   : {dataset.homography_seed}")
+        print(f"  H prob   : {dataset.homography_prob}")
+        print(f"  H kwargs : {dict(dataset.homography_kwargs)}")
     print(f"  THR      : {cfg.LOFTR.MATCH_COARSE.THR}")
 
     num_workers = 0 if args.apply_homography else int(args.num_workers)
@@ -382,7 +429,8 @@ def main() -> None:
         if args.save_figures:
             fig_path = out_dir / f"{Path(pair_short).stem}_match.png"
             _save_pair_figure(fig_path, batch, pixel_errs, args.thresholds,
-                              ckpt_path.name, pair_short, args.apply_homography)
+                              ckpt_path.name, pair_short, args.apply_homography,
+                              homography_dual=bool(dataset.homography_dual))
 
         print(f"[{idx}/{n_total}] {pair_short}: matches={per_pair['num_matches']} "
               f"mpe={per_pair['mean_pixel_error']:.2f} "
@@ -406,6 +454,10 @@ def main() -> None:
         f.write(f"data_cfg: {args.data_cfg}\n")
         f.write(f"pairs: {len(rows)}\n")
         f.write(f"apply_homography: {args.apply_homography}\n")
+        f.write(f"homography_dual: {bool(dataset.homography_dual)}\n")
+        f.write(f"homography_prob: {dataset.homography_prob}\n")
+        f.write(f"homography_seed: {dataset.homography_seed}\n")
+        f.write(f"homography_kwargs: {dict(dataset.homography_kwargs)}\n")
         f.write(f"total_matches: {len(flat)}\n")
         f.write(f"mean_pixel_error: {float(flat.mean()) if len(flat) else 0.0:.4f}\n")
         for t in args.thresholds:
