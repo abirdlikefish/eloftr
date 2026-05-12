@@ -85,8 +85,8 @@ description: |
 
 # v10：Megadepth_Syn 4 卡 DDP scale-up（v9 stack 的极限验证）
 
-> 继承链：v7 (PC+CLAHE 输入端) → v8 (MSBN fine 架构) → v9 (e2e cold start 训练策略) → **v10 (Megadepth_Syn ~115K + 4 卡 DDP scale-up)**
-> 总览见 [eloftr-cross-modal-experiments](../eloftr-cross-modal-experiments/SKILL.md)；v9 见 [eloftr-v9-e2e](../eloftr-v9-e2e/SKILL.md)
+> 继承链：v7 (PC+CLAHE 输入端) → v8 (MSBN fine 架构) → v9 (e2e cold start 训练策略) → **v10 (Megadepth_Syn ~115K + 4 卡 DDP scale-up)** → v11 (双侧激进 H aug, ship 待)
+> 总览见 [eloftr-cross-modal-experiments](../eloftr-cross-modal-experiments/SKILL.md)；v9 见 [eloftr-v9-e2e](../eloftr-v9-e2e/SKILL.md)；**v11 见 [eloftr-v11-dualh](../eloftr-v11-dualh/SKILL.md)**（继承 v10 stack byte-identical, 仅 4 cfg override 加双侧激进 H aug + WARMUP 加倍, sanity script 5 项 pre-flight 检查）
 > 数据集接入 SOP（路径 / 划分 / 平衡检查 / fix script）见 [eloftr-megadepth-syn-data](../eloftr-megadepth-syn-data/SKILL.md)
 > 4 卡 DDP runtime 与 5 个隐藏地雷见 [eloftr-server-multigpu](../eloftr-server-multigpu/SKILL.md)
 > 训练日志读取见 [eloftr-tb-analysis](../eloftr-tb-analysis/SKILL.md)
@@ -209,6 +209,12 @@ if is_aligned_irvis(data_source):
 | **L2 nscale 4→3** | precompute CLI `--pc_nscale 3`（v0-v9 默认仍 4 字节兼容）| ~2× | 边缘锐度略损（plan §4.3 sanity 验证 OK）|
 | **L3 预 resize 640** | precompute CLI `--max_long_edge 640` 把源图预降到 640 长边再算 PC（默认 0 = v0-v9 兼容）| ~7× | df 截断破坏 cache aspect, 由 §4.3 fix script 兜底 |
 | **综合** | — | **~18×** | 本质优化，PC 质量需小样本 sanity 验证 |
+
+> **关键事实（写论文 / 答辩时反直觉但要说清楚）**：**v10/v11 cache 最终落盘是 480 long-edge df=32 对齐，但 phasecong 频谱分析发生在 640 long-edge 上**。
+>
+> 完整链路：raw → `INTER_AREA` 到 640 long-edge df=32（precompute step 1）→ `phasecong(nscale=3, norient=6)` 在 640 上做 spectral 分析（precompute step 2）→ `stretch_to_uint8`（precompute step 3）→ `INTER_AREA` 到 480 long-edge df=32（[fix_pc_cache_alignment.py:L217](../../../MyScripts/fix_pc_cache_alignment.py)）→ dataset `__getitem__:L431` cv2.resize 退化为 1.0× no-op。
+>
+> 这条链路也是 **R8 runtime PC fallback** 的等价路径 —— 见 [`src/utils/pc.py::compute_pc_v11_runtime`](../../../src/utils/pc.py) + [eloftr-eval-pipeline §3.2](../eloftr-eval-pipeline/SKILL.md)。**v10/v11 ckpt 部署到新数据集**：cache 不存在时 dataset 自动 fallback 到 runtime，与 cache 字节级等价（实测同 3 对差异 ≤ 1% absolute）。Train 模式硬阻断不允许 fallback。
 
 precompute 改动（[MyScripts/precompute_pc_edges.py](../../../MyScripts/precompute_pc_edges.py)）：
 - `_build_tasks` 加 `--recursive` flag（嵌套目录递归 + 镜像输出）

@@ -27,6 +27,7 @@ from src.utils.data_source import is_aligned_irvis
 from src.datasets.megadepth import MegaDepthDataset
 from src.datasets.scannet import ScanNetDataset
 from src.datasets.roadscene import RoadSceneDataset
+from src.datasets.metu_vistir import METUVisTIRDataset
 from src.datasets.sampler import RandomConcatSampler
 
 
@@ -104,6 +105,12 @@ class MultiSceneDataModule(pl.LightningDataModule):
         self.clahe_tile_size = getattr(config.LOFTR, 'CLAHE_TILE_SIZE', [8, 8])
         self.road_ir_pc_subdir = getattr(config.DATASET, 'ROAD_IR_PC_SUBDIR', '')
         self.road_vis_pc_subdir = getattr(config.DATASET, 'ROAD_VIS_PC_SUBDIR', '')
+
+        # METU_VISTIR test-only options. Defaults match src/config/default.py
+        # so v0..v11 cfgs that don't set them stay byte-identical.
+        self.metu_undistort = getattr(config.DATASET, 'METU_UNDISTORT', True)
+        self.metu_side0 = getattr(config.DATASET, 'METU_SIDE0', 'vis')
+        self.metu_side1 = getattr(config.DATASET, 'METU_SIDE1', 'thermal')
 
         self.fp16 = config.DATASET.FP16
 
@@ -367,6 +374,29 @@ class MultiSceneDataModule(pl.LightningDataModule):
                                      coarse_scale=self.coarse_scale,
                                      fp16 = self.fp16,
                                      ))
+            elif str(data_source).lower() == 'metu_vistir':
+                # METU_VISTIR cross-modal pose-based eval (test only). One npz
+                # per scene; ConcatDataset stitches all listed npz together.
+                # PC channel comes from runtime fallback (compute_pc_v11_runtime)
+                # because METU has no pre-computed cache.
+                datasets.append(
+                    METUVisTIRDataset(
+                        root_dir=data_root,
+                        npz_path=npz_path,
+                        mode=mode,
+                        img_resize=self.mgdpt_img_resize,
+                        df=self.mgdpt_df,
+                        coarse_scale=self.coarse_scale,
+                        undistort=self.metu_undistort,
+                        side0=self.metu_side0,
+                        side1=self.metu_side1,
+                        use_edge_input=self.use_edge_input,
+                        use_clahe_ir=self.use_clahe_ir,
+                        use_clahe_vis=self.use_clahe_vis,
+                        clahe_clip_limit=self.clahe_clip_limit,
+                        clahe_tile_size=self.clahe_tile_size,
+                        fp16=self.fp16,
+                    ))
             else:
                 raise NotImplementedError()
         return ConcatDataset(datasets)

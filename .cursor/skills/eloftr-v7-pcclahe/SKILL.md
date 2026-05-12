@@ -66,9 +66,9 @@ flowchart LR
     g14 -->|"通过"| v7run["v7 cfg + bat + finetune"]
 ```
 
-## 5. 兼容性纪律：5 加固点 R1-R5 + R6 + R7
+## 5. 兼容性纪律：5 加固点 R1-R5 + R6 + R7 + R8
 
-v7 引入 8 处代码改动，但**v0-v6.1 重训 / eval 历史 ckpt 必须字节级一致**。靠 7 处加固保证：
+v7 引入 8 处代码改动，但**v0-v6.1 重训 / eval 历史 ckpt 必须字节级一致**。靠 8 处加固保证：
 
 - **R1（dataset 守卫纪律）**：[`src/datasets/roadscene.py`](../../../src/datasets/roadscene.py) `__getitem__` 所有新分支用 `if self.use_xxx:` 严格守卫。flag=False 时进入的分支**等价 v0-v6.1 现有代码**，张量值字节级相同（特别是 `np.stack([ir_raw], axis=0)` 与原 `ir_pad[None]` shape 完全相同）。
 - **R2（CLAHE worker pickle）**：`cv2.createCLAHE()` 返回的 C++ 对象在 Windows DataLoader spawn 时不能 pickle。dataset `__init__` 只存 cfg 参数，`__getitem__` 用 `hasattr(self, '_clahe')` 守卫 lazy init，每个 worker 独立持有。
@@ -76,7 +76,16 @@ v7 引入 8 处代码改动，但**v0-v6.1 重训 / eval 历史 ckpt 必须字�
 - **R4（删除 `on_load_checkpoint` 冗余 override）**：`train.py:139` 用 `pretrained_ckpt=args.ckpt_path`，走 `lightning_loftr.py:64-75` 的 pretrained_ckpt 路径。本仓库**不用** PL 原生 `Trainer.resume_from_checkpoint` API，所以 PL 的 `on_load_checkpoint` 钩子永远不触发——单路径 hook 已足够。
 - **R5（yacs `CLAHE_TILE_SIZE` 类型）**：用 `[8, 8]` (list) 而非 `(8, 8)` (tuple)。yacs 严格类型检查 cfg override，tuple 会让 v7.x ablation 想覆盖成 `[6, 6]` 时报 `TypeError`。dataset `__init__` 接收时 `tuple()` 转回 cv2 用。
 - **R6（eval pipeline 独立透传）**：[`MyScripts/eval_roadscene.py`](../../../MyScripts/eval_roadscene.py) `build_dataset` 是独立于 `data.py` 的 RoadSceneDataset 构造点，必须同步加 7 个 kwargs 透传。否则 eval v7 ckpt 时 dataset 走默认 1ch 输出与 in_ch=2 backbone 失配 RuntimeError。**两个 eval bat 共用 eval_roadscene.py，一处修复同时覆盖两个 bat**。
-- **R7（v7 OOD eval 前置条件）**：v7 训练只生成 M3FD PC cache，`eval_roadscene_finetuned.bat 7` 跑 v7 OOD eval 在 RoadScene 时还需要 RoadScene PC cache。靠 [MyScripts/precompute_pc_edges.py](../../../MyScripts/precompute_pc_edges.py) 默认双数据集行为保证（用户跑一次就两个都生成）。
+- **R7（v7 OOD eval 前置条件，**已被 R8 降级为 WARN**）**：v7 训练只生成 M3FD PC cache，`eval_roadscene_finetuned.bat 7` 跑 v7 OOD eval 在 RoadScene 时还需要 RoadScene PC cache。靠 [MyScripts/precompute_pc_edges.py](../../../MyScripts/precompute_pc_edges.py) 默认双数据集行为保证（用户跑一次就两个都生成）。R8 落地后，cache 缺失不再硬抛，dataset 自动 fallback 到 runtime PC（仅 val/test）；但**推荐预计算**以匹配训练分布。
+- **R8（runtime PC fallback / 2026-05-11）**：测试时 PC cache 缺失（整目录或单图）允许 dataset 自动 fallback 到 runtime 计算，**仅** val/test 模式；train 模式硬抛 `FileNotFoundError`（保护训练分布锁）。runtime 路径精确复制 v10/v11 cache 生成链路（`precompute_pc_edges --max_long_edge 640 --pc_nscale 3` + `fix_pc_cache_alignment` INTER_AREA → 480 long-edge），实现在 [`src/utils/pc.py`](../../../src/utils/pc.py) 的 `compute_pc_v11_runtime`。dataset 接口零侵入（无新增构造参数）。
+
+### R8 实施细节与硬约束
+
+- **runtime 输入**：必须是 CLAHE **之前**的 raw 灰度（与 `precompute_pc_edges.py` 读盘 raw 一致），dataset `__getitem__` 在 CLAHE 块之前对 `ir_raw` / `vis_raw` 做 `.copy()` 快照 (仅 `use_edge_input=True` 且 `use_clahe_*=True` 时)
+- **train 硬阻断**：`__init__` 时 PC 目录缺失 + `mode='train'` → raise；`__getitem__` 中单图缺失 + `mode='train'` → raise。两道保护，无任何 runtime 入口
+- **train 不进 fallback 分支**：`_pc_runtime_fallback` 默认 False，整个 v0-v9 训练 / eval 路径**字节级保留**（实测 v5 cfg M3FD 50 对 P@1=0.462 / P@3=0.859 / P@5=0.925 与历史一致）
+- **runtime 数值等价**：v10 ckpt + RoadScene 同 3 对 cache vs runtime 差分实测：P@1/P@3 差异 ≤ 1% absolute，部分 pair runtime 反而**略优于** v7 era cache（因为 v11 params 更接近 v10 训练分布）
+- **未来 v12+ 改 PC 参数时**的演进路径：`PC_V11_LONG_EDGE` / `PC_V11_NSCALE` 当前硬编码在 `src/utils/pc.py`，若要做 PC ablation 把这两条提升为 cfg 字段 + dataset 读 cfg 即可（非破坏性扩展）
 
 ## 6. 实测验证：gate 14 兼容性 sanity test
 

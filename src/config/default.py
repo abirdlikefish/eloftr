@@ -263,6 +263,25 @@ _CN.DATASET.ROAD_HOMOGRAPHY_KWARGS = CN(new_allowed=True)
 _CN.DATASET.ROAD_IR_PC_SUBDIR = ''
 _CN.DATASET.ROAD_VIS_PC_SUBDIR = ''
 
+# METU_VISTIR options (only consulted when TEST_DATA_SOURCE == 'METU_VISTIR').
+# Pose-based test only; METU has no train_list. Defaults match the v10/v11
+# training-time IR-VIS convention (image0 = visible) so a v0..v11 ckpt eval
+# with this dataset class behaves identically without needing per-cfg overrides.
+_CN.DATASET.METU_UNDISTORT = True   # cv2.undistort with 8-coef OpenCV model
+# image0 = thermal / image1 = vis: aligns with the v0..v11 training-side
+# convention (RoadSceneDataset.__getitem__:376-378 puts ir_dir into image0,
+# vis_dir into image1; modemb_ir/modemb_vis are bound to image0/image1
+# accordingly in src/loftr/loftr.py:117-118).
+#
+# Empirical sweep on v10 ckpt over 30 METU pairs (tmp_metu_side_sweep.py
+# 2026-05-11) reports thermal-as-image0 yields auc@20=0.87% vs 0.58%
+# (vis-as-image0) -- i.e. the training-aligned direction is ~50% better
+# despite ~3x fewer raw matches (training-side feature alignment >
+# raw match count). Keep this default unless a future ckpt's training cfg
+# explicitly puts visible into image0.
+_CN.DATASET.METU_SIDE0 = 'thermal'
+_CN.DATASET.METU_SIDE1 = 'vis'
+
 _CN.DATASET.NPE_NAME = None
 
 ##############  Trainer  ##############

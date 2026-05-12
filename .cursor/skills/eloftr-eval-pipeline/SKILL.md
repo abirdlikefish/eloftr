@@ -72,26 +72,57 @@ python MyScripts\eval_roadscene.py ^
 - `--img_resize` / `--df`：旧版有，已删，全部由 yacs 提供，确保与训练 numerics 一致。
 - 想换 HR/LR：用 `--vis_subdir crop_HR_visible` 临时覆盖，**只在做 “HR 是否影响很大” 的对比时用**，长期请改 config。
 
-### 3.1 v7 ckpt eval 前置条件（v0-v6.1 ckpt 不需要）
+### 3.1 v7+ ckpt eval 前置条件（v0-v6.1 ckpt 不需要）
 
-v7 cfg 启用 PC 边缘通道（`USE_EDGE_INPUT=True`），dataset 启动时会校验 PC 缓存目录是否存在。**v7 ckpt eval 之前必须先跑过 PC 预计算**（一次性，~35-40 min）：
+v7 cfg 启用 PC 边缘通道（`USE_EDGE_INPUT=True`），dataset 启动时会校验 PC 缓存目录是否存在。**推荐做法**是 eval 前预计算 PC cache（一次性，~35-40 min for M3FD+RoadScene；v10/v11 用 Megadepth_Syn 参数 `--max_long_edge 640 --pc_nscale 3` 大约 46 min）：
 
 ```bat
 :: 双击 MyScripts/precompute_pc_edges.bat
 ::    (默认行为 = M3FD + RoadScene 双数据集 PC cache, ~35-40 min)
-::    覆盖 v7 训练 + v7 in-domain eval (M3FD) + v7 OOD eval (RoadScene) 全部需求
+::    覆盖 v7/v8/v9 训练 + 双向 eval 全部需求
 ```
 
-| eval 命令 | PC cache 需求 | 失败现象（缺失时） |
+**自 2026-05-11 R8 落地后**：v7+ ckpt eval 在 PC cache 缺失时**不再硬抛**，dataset 自动 fallback 到 runtime PC 计算（仅 val/test 模式；train 仍硬抛保护训练分布）。
+
+| eval 命令 | PC cache 需求 | 缺失时行为 |
 |---|---|---|
 | `eval_roadscene_finetuned.bat 1`-`6_1` | **无**（v0-v6.1 cfg 默认 `USE_EDGE_INPUT=False`，dataset 不读 PC 路径）| — |
 | `eval_m3fd_finetuned.bat 1`-`6_1` | **无**（同上，即使 m3fd_trainval.py 设了 `Ir_pc/Vis_pc` 字段，dataset 的 R1 守卫保护不读）| — |
 | `eval_roadscene_official.bat`（官方 ckpt） | **无**（baseline cfg 默认 USE_EDGE_INPUT=False）| — |
-| **`eval_m3fd_finetuned.bat 7`** (v7 in-domain) | **M3FD PC cache** (`data/M3FD_Detection/Ir_pc/`, `Vis_pc/`)| `FileNotFoundError: PC cache directory not found` |
+| **`eval_m3fd_finetuned.bat 7`** (v7 in-domain) | **M3FD PC cache** (`data/M3FD_Detection/Ir_pc/`, `Vis_pc/`)| **R8 fallback**：WARN + runtime PC（~200-400 ms/img on CPU）|
 | **`eval_roadscene_finetuned.bat 7`** (v7 OOD) | **RoadScene PC cache** (`data/RoadScene/cropinfrared_pc/`, `crop_LR_visible_pc/`)| 同上 |
 | **`eval_m3fd_finetuned.bat 8`** (v8 in-domain) | **M3FD PC cache**（v8 cfg 继承 v7 → USE_EDGE_INPUT=True）| 同上 |
 | **`eval_roadscene_finetuned.bat 8`** (v8 OOD) | **RoadScene PC cache** | 同上 |
 | **v9_e2e (in-domain / OOD)** — 用 [v9-e2e SKILL §11.4](../eloftr-v9-e2e/SKILL.md) 直接调 `eval_roadscene.py`，bat 暂未支持 X=9 | **M3FD + RoadScene PC cache 都需**（v9 cfg 自有 USE_EDGE_INPUT=True，含 v7 stack）| 同上 |
+| **v10/v11 ckpt 部署到新数据集** | 新数据集 PC cache（`precompute_pc_edges --pc_nscale 3 --max_long_edge 640` + `fix_pc_cache_alignment`）| **R8 fallback**：runtime PC 路径**字节级等价** v10/v11 训练分布（实测 v10 同 3 对 cache vs runtime 差异 ≤ 1% absolute）|
+
+### 3.2 R8 runtime PC fallback 路径（2026-05-11 加入）
+
+实现在 [`src/utils/pc.py`](../../../src/utils/pc.py) 的 `compute_pc_v11_runtime(img_u8, target_hw)`，硬编码 v11 训练参数：
+
+| 参数 | 值 | 来源 |
+|---|---|---|
+| `nscale` | 3 | `precompute_pc_edges.py --pc_nscale 3`（v10/v11） |
+| `norient` | 6 | 仓库默认 `PC_NORIENT=6`，全版本一致 |
+| `long_edge` | 640 | `precompute_pc_edges.py --max_long_edge 640`（v10/v11）|
+| `interpolation` | `INTER_AREA` | `fix_pc_cache_alignment.py:L217` |
+
+runtime 完整链路（4 步，与 v10/v11 cache 生成链路 byte-equivalent，除 phasepack 浮点 reproducibility 微噪声）：
+
+```
+raw uint8 (CLAHE之前) -> INTER_AREA downscale 到 640 long-edge df=32 对齐
+                     -> phasecong(nscale=3, norient=6)
+                     -> stretch_to_uint8（per-image max norm）
+                     -> INTER_AREA resize 到 dataset 的 _resize_target_shape (480 long-edge df=32)
+```
+
+**关键约束**：
+
+- runtime 输入必须是 **CLAHE 之前** 的 raw 灰度（与 `precompute_pc_edges.py` 读盘 raw 一致）。dataset `__getitem__` 在 CLAHE 块之前对 `ir_raw` / `vis_raw` 做 `.copy()` 快照
+- **训练模式（`mode='train'`）硬抛 `FileNotFoundError`**：保护训练分布锁，runtime 永远只走测试路径
+- **val/test 模式**：整目录缺失 → `__init__` WARN 一次 + 设 `_pc_runtime_fallback=True`；单图缺失 → `__getitem__` 首次 WARN 后静默
+- **v7/v8/v9 ckpt 数值偏差**：v7-v9 cache 用 `nscale=4` 在 raw 上算（非 v11 参数），runtime 用 v11 参数 → PC channel 数值上有偏移；模型不会崩（实测 v5 cfg M3FD 50 对 P@1=0.462 字节级保留 v0-v9 路径），但 v7/v8/v9 ckpt 上 runtime 与 cache 的精度差距未必 ≤ 1%（v10/v11 ckpt 上 ≤ 1%）
+- **v12+ 改 PC 参数时演进**：`PC_V11_LONG_EDGE` / `PC_V11_NSCALE` 当前硬编码，若做 PC ablation 提升为 cfg 字段 + dataset 读 cfg 即可（非破坏性）
 
 ## 4. Bat 脚本
 
@@ -225,5 +256,6 @@ RoadScene 的 IR/VIS 标定本身就有 2-5 px 的对齐残差，因此 `overall
 | `eval_roadscene_finetuned.bat 6` 与 `6_1` 看起来跑了同一个 ckpt | bat 是旧版（没有 sub-version skip filter） | echo header 里 `Experiment` 行应分别是 `m3fd_v6_finetune` 与 `m3fd_v6_1_finetune` |
 | `[WARN] multiple cfgs match eloftr_full_vX_*.py` 触发但选错了 | 同一 X 下有多个 non-subver cfg（比如 `_combined` 和 `_finetune` 都属 v5） | 看 WARN 列出的所有候选，删掉不需要的 cfg，或把脚本里 first-match 的逻辑收紧 |
 | `RuntimeError: size mismatch for backbone.layer0.rbr_dense.conv.weight ((64,1,3,3) vs (64,2,3,3))` 在 eval 时触发 | v7 cfg 强制 backbone in_ch=2，但传入的 ckpt 是 v0-v6.1 的 in_ch=1，且 `eval_roadscene.py` 的 `build_matcher` **不**调用 `_maybe_inflate_stage0` hook（那个 hook 只在训练时 lightning_loftr.py 内部触发）| 用对应的 cfg：v7 ckpt 用 `eval_*finetuned.bat 7`；v0-v6.1 ckpt 用 `eval_*finetuned.bat 1`-`6_1`，绝不用 X=7 + v0-v6.1 ckpt |
-| `FileNotFoundError: PC cache directory not found: data/M3FD_Detection/Ir_pc` 或 `data/RoadScene/cropinfrared_pc` | v7 / v8 / v9 cfg 启用 `USE_EDGE_INPUT=True`，dataset `__init__` 校验 PC cache 目录存在但找不到 | 跑一次 `MyScripts/precompute_pc_edges.bat`（默认双数据集，~35-40 min），见 §3.1 v7 prerequisite |
+| `FileNotFoundError: PC cache directory not found in train mode` | v7+ cfg + `mode='train'` 时 PC 目录缺失（R8 train 硬阻断，保护训练分布）| 跑一次 `MyScripts/precompute_pc_edges.bat` / `.sh`，详见 §3.1。eval 永远不该见到这条 error，因为 R8 在 val/test 下走 fallback |
+| 看到 WARN `PC cache dir missing ... will compute PC on-the-fly` 但 eval 正常出 overall.txt | R8 runtime PC fallback 触发（PC 目录缺失但 v7+ cfg 启用 `USE_EDGE_INPUT=True`）| **预期行为**，详见 §3.2。要消除 WARN 只需要预计算 cache。v10/v11 ckpt 上数值字节级等价；v7/v8/v9 ckpt 上数值有偏移（cache nscale=4 vs runtime nscale=3），建议预计算 |
 | OOD（RoadScene）`total_matches` 数远小于 in-domain（M3FD），如 33K vs 463K (≈14× 差距) | **不是模型问题，是数据集差异 × pair 数差的复合**：14× = 9.5× (210 vs 22 pair) × 1.44× (每对 matches 差)。每对 matches 差距来自 RoadScene 原图低质量 (~500×329 jpg ~22KB) + 道路场景空区多，所有 v 版本（v7/v8/v9）的 in/OOD matches/pair 比例都是 1.41-1.45×，差距 < 3% | **不需要修**，是物理特性。详见 [eloftr-v9-e2e §9 Q2](../eloftr-v9-e2e/SKILL.md)；要进一步排除"模型偏见"嫌疑，对比同 X 在两个数据集 `overall.txt` 的 `total_matches` / pair 数比例，应都在 1.4× 附近 |

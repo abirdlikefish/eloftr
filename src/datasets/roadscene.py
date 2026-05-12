@@ -280,7 +280,21 @@ class RoadSceneDataset(utils_data.Dataset):
         # field is non-empty for v0-v6.1 retraining too -- but those v_x configs
         # leave USE_EDGE_INPUT default False, and *that* is what the dataset
         # checks. Never branch on the subdir field alone.
+        # R8 (runtime PC fallback, 2026-05-11): in val/test mode allow PC cache
+        # to be absent and compute PC on-the-fly via src.utils.pc. Training
+        # mode KEEPS the original hard FileNotFoundError to protect the
+        # v7+/v10/v11 training distribution (PC cache 必须在 raw 上 precompute,
+        # 训练分布锁定在 precompute --max_long_edge 640 --pc_nscale 3 +
+        # fix_pc_cache_alignment 之后的最终 480 long-edge cache). Two flags:
+        #   _pc_runtime_fallback : True when whole PC dir is missing in val/test
+        #     mode (set once in __init__, drives every __getitem__ for this
+        #     dataset instance to skip cv2.imread and call compute_pc_v11_runtime).
+        #   _pc_missing_warned   : True after the first per-file cache miss WARN
+        #     in __getitem__ (val/test only). Avoids spamming the log when most
+        #     files have cache but a handful are missing.
         self.use_edge_input = bool(use_edge_input)
+        self._pc_runtime_fallback = False
+        self._pc_missing_warned = False
         if self.use_edge_input:
             if not ir_pc_subdir or not vis_pc_subdir:
                 raise ValueError(
@@ -289,15 +303,28 @@ class RoadSceneDataset(utils_data.Dataset):
                     "configs/data/m3fd_trainval.py for an example).")
             self.ir_pc_dir = osp.join(root_dir, ir_pc_subdir)
             self.vis_pc_dir = osp.join(root_dir, vis_pc_subdir)
-            if not osp.isdir(self.ir_pc_dir):
-                raise FileNotFoundError(
-                    f"PC cache directory not found: {self.ir_pc_dir}. "
-                    f"Run MyScripts/precompute_pc_edges.bat (defaults to both "
-                    f"M3FD + RoadScene) before any v7_pcclahe training/eval.")
-            if not osp.isdir(self.vis_pc_dir):
-                raise FileNotFoundError(
-                    f"PC cache directory not found: {self.vis_pc_dir}. "
-                    f"Run MyScripts/precompute_pc_edges.bat first.")
+            pc_dirs_ok = osp.isdir(self.ir_pc_dir) and osp.isdir(self.vis_pc_dir)
+            if not pc_dirs_ok:
+                if self.mode == "train":
+                    raise FileNotFoundError(
+                        f"PC cache directory not found in train mode: "
+                        f"{self.ir_pc_dir} or {self.vis_pc_dir}. "
+                        f"Training requires precomputed PC cache to match the "
+                        f"v7+/v10/v11 training distribution. Run "
+                        f"MyScripts/precompute_pc_edges.bat (defaults to M3FD + "
+                        f"RoadScene; for Megadepth_Syn use "
+                        f"`--dataset Megadepth_Syn --recursive --max_long_edge 640 "
+                        f"--pc_nscale 3` then `fix_pc_cache_alignment.py`).")
+                # val/test: enable runtime fallback, WARN once at dataset init.
+                self._pc_runtime_fallback = True
+                from loguru import logger
+                logger.warning(
+                    f"RoadSceneDataset ({self.dataset_name}, mode={self.mode}): "
+                    f"PC cache dir missing ({self.ir_pc_dir} or "
+                    f"{self.vis_pc_dir}); will compute PC on-the-fly per sample "
+                    f"(slower, ~200-400 ms/img on CPU). For deployment speed, "
+                    f"run MyScripts/precompute_pc_edges.py + "
+                    f"fix_pc_cache_alignment.py to materialise cache once.")
         else:
             # Crucial: leave PC dirs as None so any accidental access throws
             # a clear AttributeError instead of silently using a stale path.
@@ -358,6 +385,28 @@ class RoadSceneDataset(utils_data.Dataset):
         h0_raw, w0_raw = ir_raw.shape
         h1_raw, w1_raw = vis_raw.shape
 
+        # R8: snapshot CLAHE-untouched raw for the runtime PC fallback path.
+        # MyScripts/precompute_pc_edges.py reads raw straight from disk
+        # (cv2.imread), so the cached PC was computed BEFORE CLAHE was ever
+        # applied. To match the v10/v11 cache distribution byte-for-byte when
+        # running PC on-the-fly, we MUST feed compute_pc_v11_runtime the raw
+        # pre-CLAHE pixels. We snapshot only when use_edge_input=True (otherwise
+        # the snapshot is dead weight) and only when CLAHE is actually applied
+        # (otherwise ir_raw is already pre-CLAHE so the snapshot is a useless
+        # copy). The two ~1 MB .copy() per pair cost <=1 ms each on a typical
+        # 1024x768 grayscale, negligible vs the dataloader pipeline.
+        ir_raw_for_pc = None
+        vis_raw_for_pc = None
+        if self.use_edge_input:
+            if self.use_clahe_ir:
+                ir_raw_for_pc = ir_raw.copy()
+            else:
+                ir_raw_for_pc = ir_raw
+            if self.use_clahe_vis:
+                vis_raw_for_pc = vis_raw.copy()
+            else:
+                vis_raw_for_pc = vis_raw
+
         # CLAHE on raw uint8 BEFORE resize/warp/pad. cv2.createCLAHE only
         # accepts uint8/uint16 inputs (running it after the /255.0 float cast
         # would error). Order: read -> CLAHE -> resize -> warp -> pad ->
@@ -372,64 +421,118 @@ class RoadSceneDataset(utils_data.Dataset):
         # alongside the gray channel through every following geometric op
         # (resize / warp / pad). PC stem matches the source filename (the
         # precompute script writes <stem>.png regardless of source ext).
+        #
+        # R8 (runtime fallback): three states for each (ir_pc_raw, vis_pc_raw):
+        #   1. self._pc_runtime_fallback=True: whole dir was absent at
+        #      __init__ time, never touch disk; ir_pc_raw / vis_pc_raw stay
+        #      None and the resize block below dispatches to
+        #      compute_pc_v11_runtime.
+        #   2. dir exists but a specific file is missing:
+        #      - mode='train' -> raise (preserve v7 R1 hard-error behaviour;
+        #        training MUST see the training distribution).
+        #      - mode='val'/'test' -> first miss WARN, then null-out
+        #        ir_pc_raw/vis_pc_raw so the resize block falls through to
+        #        runtime compute (same path as state 1, just per-file).
+        #   3. dir + file both exist -> read cache normally; keep the original
+        #      target-shape sanity check (covers v10 unfixed cache case).
         ir_pc_raw = None
         vis_pc_raw = None
-        if self.use_edge_input:
+        if self.use_edge_input and not self._pc_runtime_fallback:
             pc_name = osp.splitext(name)[0] + ".png"
             ir_pc_path = osp.join(self.ir_pc_dir, pc_name)
             vis_pc_path = osp.join(self.vis_pc_dir, pc_name)
             ir_pc_raw = cv2.imread(str(ir_pc_path), cv2.IMREAD_GRAYSCALE)
             vis_pc_raw = cv2.imread(str(vis_pc_path), cv2.IMREAD_GRAYSCALE)
-            if ir_pc_raw is None:
-                raise FileNotFoundError(
-                    f"Failed to read IR PC cache: {ir_pc_path}. "
-                    f"Run MyScripts/precompute_pc_edges.bat to (re)generate.")
-            if vis_pc_raw is None:
-                raise FileNotFoundError(f"Failed to read VIS PC cache: {vis_pc_path}.")
-            # Sanity: cache and raw must produce the SAME df-aligned target
-            # shape under _resize_keep_aspect(., img_resize, df). Downstream
-            # L383 `cv2.resize(ir_pc_raw, (w0_r, h0_r))` will force cache to
-            # raw's target; if the implied caches' own target differs, the
-            # cv2.resize introduces a non-uniform stretch -- which is fine for
-            # SHAPE alignment (np.stack succeeds because cache lands at raw
-            # target shape regardless), but produces subtle pixel
-            # mis-correspondence vs. the cleaner "cache already at training
-            # resolution" path. So we require strict target-shape equality.
-            #
-            # Compatibility:
-            # - v0-v9 (M3FD/RoadScene): cache and raw are precomputed at the
-            #   same resolution -> _target_shape returns identical values, passes.
-            # - v10 (Megadepth_Syn) after MyScripts/fix_pc_cache_alignment.py:
-            #   cache is pre-resized to dataset target -> trivially passes.
-            # - v10 raw cache (no fix script run): caches at max_long_edge=640
-            #   may round to different df-aligned target than raw at
-            #   img_resize=480 (depends on raw aspect, see plan SS3.1) ->
-            #   raises here; user needs to run fix script first.
-            target_raw_ir = _resize_target_shape(ir_raw.shape, self.img_resize, self.df)
-            target_pc_ir = _resize_target_shape(ir_pc_raw.shape, self.img_resize, self.df)
-            if target_raw_ir != target_pc_ir:
-                raise RuntimeError(
-                    f"IR PC cache shape {ir_pc_raw.shape} resizes to {target_pc_ir} but "
-                    f"raw IR shape {ir_raw.shape} resizes to {target_raw_ir} (img_resize="
-                    f"{self.img_resize}, df={self.df}) for {name}. "
-                    f"Run MyScripts/fix_pc_cache_alignment.py to pre-align cache to raw target, "
-                    f"OR re-run precompute_pc_edges.py with --max_long_edge={self.img_resize} "
-                    f"to produce caches directly at training resolution.")
-            target_raw_vis = _resize_target_shape(vis_raw.shape, self.img_resize, self.df)
-            target_pc_vis = _resize_target_shape(vis_pc_raw.shape, self.img_resize, self.df)
-            if target_raw_vis != target_pc_vis:
-                raise RuntimeError(
-                    f"VIS PC cache shape {vis_pc_raw.shape} resizes to {target_pc_vis} but "
-                    f"raw VIS shape {vis_raw.shape} resizes to {target_raw_vis} for {name}. "
-                    f"Run MyScripts/fix_pc_cache_alignment.py first.")
+            if ir_pc_raw is None or vis_pc_raw is None:
+                if self.mode == "train":
+                    # Match v7 R1 hard-error semantics; training cannot fall
+                    # back to runtime because that would silently shift the
+                    # training distribution.
+                    missing = []
+                    if ir_pc_raw is None:
+                        missing.append(f"IR PC: {ir_pc_path}")
+                    if vis_pc_raw is None:
+                        missing.append(f"VIS PC: {vis_pc_path}")
+                    raise FileNotFoundError(
+                        f"Failed to read PC cache in train mode ({', '.join(missing)}). "
+                        f"Run MyScripts/precompute_pc_edges.bat to (re)generate.")
+                # val/test: log once, then drop to runtime compute below.
+                if not self._pc_missing_warned:
+                    from loguru import logger
+                    logger.warning(
+                        f"RoadSceneDataset ({self.dataset_name}, mode={self.mode}): "
+                        f"per-file PC cache miss starting at {name}; computing "
+                        f"on-the-fly via src.utils.pc.compute_pc_v11_runtime. "
+                        f"Subsequent misses will be silent.")
+                    self._pc_missing_warned = True
+                ir_pc_raw = None
+                vis_pc_raw = None
+            else:
+                # Sanity: cache and raw must produce the SAME df-aligned target
+                # shape under _resize_keep_aspect(., img_resize, df). Downstream
+                # L383 `cv2.resize(ir_pc_raw, (w0_r, h0_r))` will force cache to
+                # raw's target; if the implied caches' own target differs, the
+                # cv2.resize introduces a non-uniform stretch -- which is fine for
+                # SHAPE alignment (np.stack succeeds because cache lands at raw
+                # target shape regardless), but produces subtle pixel
+                # mis-correspondence vs. the cleaner "cache already at training
+                # resolution" path. So we require strict target-shape equality.
+                #
+                # Compatibility:
+                # - v0-v9 (M3FD/RoadScene): cache and raw are precomputed at the
+                #   same resolution -> _target_shape returns identical values, passes.
+                # - v10 (Megadepth_Syn) after MyScripts/fix_pc_cache_alignment.py:
+                #   cache is pre-resized to dataset target -> trivially passes.
+                # - v10 raw cache (no fix script run): caches at max_long_edge=640
+                #   may round to different df-aligned target than raw at
+                #   img_resize=480 (depends on raw aspect, see plan SS3.1) ->
+                #   raises here; user needs to run fix script first.
+                # - R8 runtime fallback: compute_pc_v11_runtime emits target_hw
+                #   directly, so it can never trigger this check (we only reach
+                #   here when ir_pc_raw/vis_pc_raw came from disk).
+                target_raw_ir = _resize_target_shape(ir_raw.shape, self.img_resize, self.df)
+                target_pc_ir = _resize_target_shape(ir_pc_raw.shape, self.img_resize, self.df)
+                if target_raw_ir != target_pc_ir:
+                    raise RuntimeError(
+                        f"IR PC cache shape {ir_pc_raw.shape} resizes to {target_pc_ir} but "
+                        f"raw IR shape {ir_raw.shape} resizes to {target_raw_ir} (img_resize="
+                        f"{self.img_resize}, df={self.df}) for {name}. "
+                        f"Run MyScripts/fix_pc_cache_alignment.py to pre-align cache to raw target, "
+                        f"OR re-run precompute_pc_edges.py with --max_long_edge={self.img_resize} "
+                        f"to produce caches directly at training resolution.")
+                target_raw_vis = _resize_target_shape(vis_raw.shape, self.img_resize, self.df)
+                target_pc_vis = _resize_target_shape(vis_pc_raw.shape, self.img_resize, self.df)
+                if target_raw_vis != target_pc_vis:
+                    raise RuntimeError(
+                        f"VIS PC cache shape {vis_pc_raw.shape} resizes to {target_pc_vis} but "
+                        f"raw VIS shape {vis_raw.shape} resizes to {target_raw_vis} for {name}. "
+                        f"Run MyScripts/fix_pc_cache_alignment.py first.")
 
         # 1. Resize each image independently (long edge = img_resize, df-aligned).
         ir, h0_r, w0_r = _resize_keep_aspect(ir_raw, self.img_resize, self.df)
         vis, h1_r, w1_r = _resize_keep_aspect(vis_raw, self.img_resize, self.df)
         if self.use_edge_input:
-            # Reuse the same target shape so PC and gray stay pixel-aligned.
-            ir_pc = cv2.resize(ir_pc_raw, (w0_r, h0_r))
-            vis_pc = cv2.resize(vis_pc_raw, (w1_r, h1_r))
+            if ir_pc_raw is not None and vis_pc_raw is not None:
+                # Cache-hit path (states 3 of the trio): reuse the same target
+                # shape so PC and gray stay pixel-aligned. After
+                # fix_pc_cache_alignment the cache shape already equals
+                # (h0_r, w0_r) and this cv2.resize is a 1.0x no-op.
+                ir_pc = cv2.resize(ir_pc_raw, (w0_r, h0_r))
+                vis_pc = cv2.resize(vis_pc_raw, (w1_r, h1_r))
+            else:
+                # R8 runtime fallback (val/test only -- train mode raises in
+                # the cache-read block above before reaching here). Either the
+                # whole dir is missing (_pc_runtime_fallback=True) or a
+                # specific file was missing. Either way, recompute PC on-the-fly
+                # via the v11-equivalent path. We feed the PRE-CLAHE raw
+                # (ir_raw_for_pc / vis_raw_for_pc snapshotted earlier) so the
+                # phasecong input matches what precompute_pc_edges.py read from
+                # disk during cache generation.
+                from src.utils.pc import compute_pc_v11_runtime
+                ir_pc = compute_pc_v11_runtime(
+                    ir_raw_for_pc, target_hw=(h0_r, w0_r))
+                vis_pc = compute_pc_v11_runtime(
+                    vis_raw_for_pc, target_hw=(h1_r, w1_r))
 
         # 2. Optionally warp IR and/or VIS *before* padding so the Homography
         # is centred on the real image content rather than the padded canvas

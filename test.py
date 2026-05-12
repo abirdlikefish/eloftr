@@ -11,6 +11,13 @@ from src.lightning.lightning_loftr import PL_LoFTR
 
 import torch
 
+# Windows + NumPy 2.0+ + PL 1.3.5 compatibility patch (mirrors train.py:59-60).
+# PL ModelCheckpoint default ctor calls torch.tensor(np.Inf), removed in NumPy
+# 2.0; aliasing keeps PL 1.3.5 working without forking the package. Detail
+# in .cursor/skills/eloftr-windows-setup SKILL.md table 1.
+import numpy as np
+np.Inf = np.inf
+
 def parse_args():
     # init a costum parser which will be added into pl.Trainer parser
     # check documentation: https://pytorch-lightning.readthedocs.io/en/latest/common/trainer.html#trainer-flags

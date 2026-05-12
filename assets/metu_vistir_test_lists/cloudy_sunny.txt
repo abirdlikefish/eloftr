@@ -1,0 +1,4 @@
+cloudy_sunny_scene_1.npz
+cloudy_sunny_scene_2.npz
+cloudy_sunny_scene_3.npz
+cloudy_sunny_scene_4.npz

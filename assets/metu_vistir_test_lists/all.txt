@@ -1,0 +1,10 @@
+cloudy_cloudy_scene_1.npz
+cloudy_cloudy_scene_2.npz
+cloudy_cloudy_scene_3.npz
+cloudy_cloudy_scene_4.npz
+cloudy_cloudy_scene_5.npz
+cloudy_cloudy_scene_6.npz
+cloudy_sunny_scene_1.npz
+cloudy_sunny_scene_2.npz
+cloudy_sunny_scene_3.npz
+cloudy_sunny_scene_4.npz

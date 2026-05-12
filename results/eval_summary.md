@@ -8,7 +8,7 @@
 >
 > **重要口径提示**：v5..v9 在 M3FD 上训练，因此 §1 M3FD test 对它们是 **in-domain**；v10 在 Megadepth_Syn 上训练，**没看过 M3FD 一帧**，所以 §1 M3FD test 对 v10 是 **OOD**。RoadScene 22 pair 对所有版本都是 OOD。看综合通用性时这一点很关键（详见 §3 + §4 观察 7）。
 >
-> 最近一次更新：2026-05-08（v10 Megadepth_Syn 4 卡 DDP ship 完成 + 双数据集独立 eval 跑完，新综合通用性 SOTA = 1.9020 vs v9 1.7001）。
+> 最近一次更新：2026-05-11（接入 §6 METU_VISTIR pose-based 评测，2590 pair / 3 子集 / auc@5/10/20° 协议；30-pair smoke 数字进表，完整 2590 pair 由 `MyScripts/eval_metu_vistir_finetuned.bat` 触发）。
 
 ---
 
@@ -101,6 +101,58 @@
 
    这是 v10 在综合通用性上的核心证据：**几乎消除了 in-domain / OOD 的鸿沟**，而不是把 in-domain 数字推得更高。
 8. **v10 训练 val P@3 / P@5 接近饱和（0.998 / 0.999）但独立 eval 数字明显低于这两者**：原因是 Megadepth_Syn 训练 val 的 IR-VIS 是 pixel-aligned by construction（style-transfer 产物）+ val 时 homography aug 关掉（[`src/lightning/data.py` L288](../src/lightning/data.py)：`homography_aug=(... and mode == 'train')`），val 任务退化为 identity matching。**论文 / 答辩永远引用本表（独立 eval）数字，不要引用 ckpt 文件名上的 0.998**。详见 [eloftr-v10-msyn SKILL §8.1 注](../.cursor/skills/eloftr-v10-msyn/SKILL.md)。
+
+---
+
+## 6. METU_VISTIR test（真采集 IR-VIS 跨模态 + 跨光照评测，pose-based）
+
+> **本节是新接入的真实 LWIR/VIS 数据集 [METU_VISTIR](https://github.com/baudouy/METU_VisTIR_dataset)** —— 跟 §1 §2 完全不同的协议：
+>
+> | 维度 | §1 M3FD / §2 RoadScene | §6 METU_VISTIR |
+> |---|---|---|
+> | 数据采集 | 同视点 IR-VIS 配准（H 对齐评测） | 真无人机多视角立体采集，VIS 4K + LWIR 0.5K，自带 K + 8 阶畸变 + 4×4 相对位姿 |
+> | 评测指标 | mpe / P@1/3/5px（H 投影像素误差） | **auc@5°/10°/20°（E 矩阵分解 R,t 位姿误差）** + prec@5e-4 |
+> | 监督协议 | 不需要相机参数 | 需要 K0 / K1 / T_0to1，**不需要** depth |
+> | 子集 | 单 split | **3 子集**：all / cloudy_cloudy（同光照）/ cloudy_sunny（跨光照，最难） |
+> | 评测入口 | `MyScripts/eval_roadscene.py` | `test.py` 原生位姿评测 + `eval_metu_vistir_finetuned.bat` 包装 |
+>
+> 数据接入实现：
+> - 数据集类 [src/datasets/metu_vistir.py](../src/datasets/metu_vistir.py)：image-list + pair-index（`pair_infos[i]=(idx0, idx1)` 跨帧选 stereo 双视图，跟 MegaDepthDataset 同结构）+ undistort + 双路独立 resize + 各自 K + PC 实时算 fallback
+> - dispatch [src/lightning/data.py:_build_concat_dataset](../src/lightning/data.py)（+12 行 `elif metu_vistir`）
+> - 3 套 cfg：[configs/data/metu_vistir_test_{all,cloudy_cloudy,cloudy_sunny}.py](../configs/data/)
+> - `assets/metu_vistir_test_lists/{all,cloudy_cloudy,cloudy_sunny}.txt` 静态 list（10/6/4 行 .npz 文件名）
+>
+> **关键发现**（落地阶段一手 confirm，2026-05-11）：
+>
+> 1. **`poses[idx]` 是 camera-to-world (C2W)**，不是 MegaDepth 的 W2C。所以 `T_0to1 = inv(P1) @ P0`（不是 `P1 @ inv(P0)`）—— 否则 R/t 误差从 ~12° 飙到 ~38°。
+> 2. **METU_SIDE0='thermal' 默认**（严格对齐 v0..v11 训练侧约定：[`src/datasets/roadscene.py:376-378`](../src/datasets/roadscene.py) 把 IR 放 image0，[`src/loftr/loftr.py:117-118`](../src/loftr/loftr.py) modemb_ir 绑定 image0）。30-pair sweep ([`tmp_metu_side_sweep.py`](../tmp_metu_side_sweep.py) 2026-05-11) 在 v10 ckpt 上的对照：
+>
+>    | SIDE0 | num_matches median | R_err median | auc@5° | auc@10° | auc@20° | prec@5e-4 |
+>    |---|---:|---:|---:|---:|---:|---:|
+>    | **thermal** ✅ | 226 | **17.55°** | 0.0000 | 0.0000 | **0.0087** | 0.1302 |
+>    | vis ❌ | 639 | 20.38° | 0.0000 | 0.0000 | 0.0058 | 0.1493 |
+>
+>    早先 5-pair smoke 看 num_matches 13 vs 267 误判选了 'vis'；30-pair 表明 thermal-image0 总 R/t 中位更小、auc@20° 高 50%。「训练-测试模态对齐」收益 > 「raw match 数量」。
+>
+> 30-pair 预览（命令行 smoke 阶段，仅供 sanity 数字方向；完整 2590-pair 由 `MyScripts/eval_metu_vistir_finetuned.bat 10` 触发约 3.6 hr 跑出）：
+
+| ckpt（30 pair smoke） | SIDE0 | RANSAC | num_matches | prec@5e-4 | auc@5° | auc@10° | auc@20° |
+|---|---|---|---:|---:|---:|---:|---:|
+| 官方 outdoor.ckpt（baseline）¹ | vis | RANSAC pix_thr=2 ×5 | 560 | 0.117 | 0.0099 | 0.0225 | **0.0690** |
+| v10 ep11（msyn）⚡ | **thermal** | RANSAC pix_thr=2 ×5 | 226 | 0.130 | 0.0000 | 0.0000 | 0.0087 |
+| v10 ep11（msyn）旧（误判） | vis | RANSAC pix_thr=2 ×5 | 652 | 0.150 | 0.0000 | 0.0000 | 0.0058 |
+
+¹ 官方 outdoor.ckpt 是 RGB-RGB MegaDepth 训练，没有 modemb / MSBN（baseline cfg 全 False），所以 SIDE0 选哪边对它无意义；这里 SIDE0=vis 用的是 metu_vistir_test_all.py 修复前的旧默认。**v0..v11 finetuned ckpt 的 SIDE0 必须是 'thermal'**（cfg 默认值已修），跑官方 baseline 用旧 cfg 重跑出来的数字仅用作 baseline 上限参考。
+
+⚡ **关键观察 vs §1/§2**：v10 在 **真 LWIR + 真多视角** 的 METU 上 auc@20° 仅 0.6%（vs 官方 outdoor.ckpt 的 6.9%），prec@5e-4 反而高（0.15 vs 0.12）—— **局部 match 比 outdoor 准但全局位姿估计完全失败**。最可能解释：v10 训练分布是「合成 IR + 几何位姿基本对齐（pixel-aligned by construction + Homography aug 变化小）」，到「真 LWIR + 大幅多视角」时 backbone 特征仍能局部对齐但全局几何 prior 失效。**这正是 v10 留给 v12+（pose-based 真训练）要解决的根本问题**。
+
+> 完整 2590-pair 跑命令（3 子集顺跑约 3.6 hr）：
+> ```bat
+> MyScripts\eval_metu_vistir_finetuned.bat 10           :: v10 best p@3px
+> MyScripts\eval_metu_vistir_finetuned.bat 10 -1 6      :: v10 last.ckpt
+> MyScripts\eval_metu_vistir_official.bat               :: outdoor.ckpt baseline
+> ```
+> 输出在 `dump/metu_eval_v10_version0_top1/{all,cloudy_cloudy,cloudy_sunny}/overall.txt`。完整数字跑完后追加到本节表里（在 demo 行下方）。
 
 ---
 
