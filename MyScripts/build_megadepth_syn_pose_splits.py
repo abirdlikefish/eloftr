@@ -7,7 +7,9 @@ group_by + 单 scene cap (val/test 候选只从 [3K, 50K] pair 数的 scene 里
 
 Balance check (raise ValueError if violated, prompt user to bump --seed):
   - val/test 总 pair 数 >= 5000
-  - val/test 任一单 scene 占比 <= 30%
+  - val/test 任一单 scene 占比 <= 35% (1.4x of 25% even-split for 4-scene splits;
+    放宽自 0.30 因为 4-scene order-statistics 期望 max/sum ~= 0.41, 0.30 触发率太高
+    实测 10 seed 全 fail。0.35 仍远低于 0.50 单 scene 主导线)
   - val/test 单 scene pair 数 in [3K, 50K] (避开 0024 类百万 scene 主导 val
     metric / 避开 530 pair 类小 scene 当 val/test 信号太弱)
 
@@ -61,8 +63,13 @@ def parse_args():
                    help="single scene must have <= N pairs to be eligible for val/test")
     p.add_argument("--min_total_pair_valtest", type=int, default=5000,
                    help="val/test total pair must >= N each")
-    p.add_argument("--max_single_scene_ratio", type=float, default=0.30,
-                   help="single scene must contribute <= R fraction of val/test total")
+    p.add_argument("--max_single_scene_ratio", type=float, default=0.35,
+                   help="single scene must contribute <= R fraction of val/test total. "
+                        "Loosened 0.30 -> 0.35 after empirical 10-seed sweep all failed: "
+                        "with n_val=n_test=4 and pool [3K, 50K], 4-scene order-statistics "
+                        "max/sum expectation ~= 0.41, so 0.30 (1.2x of 25% even-split) triggers "
+                        "in ~95% of seeds; 0.35 (1.4x even-split) gives ~30% pass rate, still "
+                        "safely below the 0.50 'single-scene dominates split' line.")
     return p.parse_args()
 
 
