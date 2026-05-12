@@ -125,8 +125,8 @@ def check_3_paths_and_4_crossview(train: list[str], val: list[str], test: list[s
             raise ValueError(
                 f"[CHECK 3 PATHS] missing npz: {npz_path}\n"
                 f"  check the scene_info_pose symlink in data/Megadepth_Syn/index/")
-        # NpzFile.__enter__ requires numpy >= 1.15; use try/finally for
-        # cross-numpy compat (server PyTorch 1.12.1 ships an older numpy).
+        # Cross-numpy compat: np.load may return NpzFile (newer numpy) or
+        # plain dict (server eloftr_yurupeng). hasattr handles both.
         f = np.load(npz_path, allow_pickle=True)
         try:
             pair_infos = f["pair_infos"]
@@ -134,7 +134,8 @@ def check_3_paths_and_4_crossview(train: list[str], val: list[str], test: list[s
             intrinsics = f["intrinsics"]
             poses = f["poses"]
         finally:
-            f.close()
+            if hasattr(f, "close"):
+                f.close()
         if len(pair_infos) == 0:
             continue
         pi = rng.choice(pair_infos)
@@ -222,7 +223,8 @@ def check_5_supervision(train: list[str], seed: int = 42):
             intrinsics = f["intrinsics"]
             poses = f["poses"]
         finally:
-            f.close()
+            if hasattr(f, "close"):
+                f.close()
         if len(pair_infos) == 0:
             continue
         pi = rng.choice(pair_infos)

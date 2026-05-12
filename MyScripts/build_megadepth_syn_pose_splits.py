@@ -86,15 +86,20 @@ def count_pairs(npz_dir: Path, npz_stem: str) -> int:
     path = npz_dir / f"{npz_stem}.npz"
     if not path.exists():
         return 0
-    # NpzFile.__enter__ requires numpy >= 1.15; server PyTorch 1.12.1
-    # ships an older numpy that lacks __enter__. Use try/finally instead
-    # of `with` for cross-numpy compat (same pattern as LoFTR upstream
-    # src/datasets/megadepth.py L48).
+    # Cross-numpy compat:
+    #   * newer numpy (>= 1.15): np.load returns NpzFile (supports `with` /
+    #     .close()).
+    #   * server eloftr_yurupeng numpy: returns a plain `dict` (no __enter__,
+    #     no .close()).
+    # LoFTR upstream src/datasets/megadepth.py:48-51 also assumes the latter
+    # (`del self.scene_info['pair_infos']` works only on dict, not NpzFile).
+    # We use hasattr to handle both.
     f = np.load(path, allow_pickle=True)
     try:
         return int(len(f["pair_infos"]))
     finally:
-        f.close()
+        if hasattr(f, "close"):
+            f.close()
 
 
 def group_by_scene(npz_names: list[str]) -> dict[str, list[str]]:

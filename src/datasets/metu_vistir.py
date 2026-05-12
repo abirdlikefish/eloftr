@@ -178,10 +178,11 @@ class METUVisTIRDataset(utils_data.Dataset):
         # closed before DataLoader workers fork (np.load with allow_pickle
         # leaves a lazy NpzFile that doesn't pickle reliably across spawn).
         #
-        # NpzFile.__enter__ requires numpy >= 1.15; server PyTorch 1.12.1
-        # ships an older numpy that lacks __enter__ (AttributeError: __enter__).
-        # Use try/finally for cross-numpy compat (same pattern as LoFTR
-        # upstream src/datasets/megadepth.py L48).
+        # Cross-numpy compat: np.load may return either an NpzFile (newer
+        # numpy >= 1.15, supports `with` / .close()) or a plain dict (server
+        # eloftr_yurupeng's older numpy, no __enter__ / no .close()). LoFTR
+        # upstream src/datasets/megadepth.py:48-51 assumes the dict path
+        # (`del self.scene_info['pair_infos']`). hasattr handles both.
         f = np.load(npz_path, allow_pickle=True)
         try:
             self._image_paths = f['image_paths'].copy()           # (N_img, 2) str
@@ -190,7 +191,8 @@ class METUVisTIRDataset(utils_data.Dataset):
             self._poses = f['poses'].copy()                       # (N_img, 4, 4)
             self._pair_infos = f['pair_infos'].copy()             # (N_pair, 2) object
         finally:
-            f.close()
+            if hasattr(f, "close"):
+                f.close()
 
         # v7+ pcclahe knobs (R2 lazy CLAHE init for worker-pickle safety).
         self.use_edge_input = bool(use_edge_input)
