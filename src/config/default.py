@@ -282,6 +282,17 @@ _CN.DATASET.METU_UNDISTORT = True   # cv2.undistort with 8-coef OpenCV model
 _CN.DATASET.METU_SIDE0 = 'thermal'
 _CN.DATASET.METU_SIDE1 = 'vis'
 
+# Pad-to-square switch for METU_VISTIR test loop. MINIMA's reference protocol
+# (data_io_loftr.py L34-71 + test_relative_pose_infrared.py) explicitly runs
+# matcher with padding=False at bs=1: each pair forwards through ELoFTR at its
+# own undistorted+resized H/W. Our previous dataset always pad-zeroed to a
+# square canvas (to keep bs>1 collate well-defined for hypothetical batched
+# eval), which is a different code path from MINIMA and a small numerical
+# perturbation (border-padded zeros leak into RepVGG/coarse attention near
+# the seam). Default False = MINIMA-exact; set True only if you run METU
+# eval with bs>1 (PyTorch default_collate then needs uniform shapes).
+_CN.DATASET.METU_PAD_TO_SQUARE = False
+
 # Megadepth_Syn_Pose (v13) options. Only consulted when TRAINVAL_DATA_SOURCE
 # == 'Megadepth_Syn_Pose' (cross-view + cross-modal pose-supervised training
 # on LoFTR scene_info_0.1_0.7 + Megadepth_Syn IR/VIS assets). 'ir2vis' is

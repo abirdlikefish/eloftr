@@ -41,17 +41,29 @@ import numpy as np
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-NPZ_DIR = REPO_ROOT / "data/Megadepth_Syn/index/scene_info_pose"
-LIST_DIR = REPO_ROOT / "data/Megadepth_Syn/index/trainvaltest_list_pose"
-DATA_ROOT = REPO_ROOT / "data/Megadepth_Syn"
+NPZ_DIR        = REPO_ROOT / "data/Megadepth_Syn/index/scene_info_pose"
+LIST_DIR_TRAIN = REPO_ROOT / "data/Megadepth_Syn/index/trainvaltest_list_src"  # LoFTR 官方 (train_list.txt / test_list.txt)
+LIST_DIR_VAL   = REPO_ROOT / "data/Megadepth_Syn/index"                          # 小 val 平铺在 index/ 下
+DATA_ROOT      = REPO_ROOT / "data/Megadepth_Syn"
 
 
 def _read_list(name: str) -> list[str]:
-    path = LIST_DIR / f"{name}_list_pose.txt"
+    """Read the npz-stem list for the given split.
+
+    train/test go through LoFTR's official ``trainvaltest_list/`` softlinks
+    (file names are ``<split>_list.txt`` -- no ``_pose`` suffix). val goes
+    through the v13-truncated ``val_list_loftr_small.txt`` placed flat under
+    ``data/Megadepth_Syn/index/``.
+    """
+    if name == "val":
+        path = LIST_DIR_VAL / "val_list_loftr_small.txt"
+    else:  # "train" / "test"
+        path = LIST_DIR_TRAIN / f"{name}_list.txt"
     if not path.exists():
         raise ValueError(
             f"[CHECK 1 SOURCE] missing: {path}\n"
-            f"  run `python MyScripts/build_megadepth_syn_pose_splits.py` first")
+            f"  (val needs val_list_loftr_small.txt 2-line file; "
+            f"train/test rely on the LoFTR trainvaltest_list_src softlink)")
     with open(path, "r", encoding="utf-8") as f:
         names = [ln.strip() for ln in f if ln.strip()]
     if not names:

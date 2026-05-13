@@ -33,12 +33,19 @@ Schedule: max_ep=12, MSLR=[3,5,7] (LR x= 0.5 each), ES patience=3.
 Same as v10 ddp; v13 wall-clock SHOULD be similar (~17h) since per-step cost
 is the same minus PC fallback (which v13 doesn't use).
 
-Sampler: scene-balance N_SAMPLES_PER_SUBSET=200 (LoFTR default; v13 has
-~145 train npz with median 15K pair each, total ~8.86M). With 200 per
-subset, each epoch sees ~145*200 = 29K pair pre-shard. 4-GPU
-get_local_split shards npz at scene level (data.py L320), so each rank
-gets ~36 npz * 200 = 7200 pair / ep. Acceptable density for fine-tuning
-from outdoor.ckpt; no need to push higher (LoFTR original recipe).
+Sampler: scene-balance N_SAMPLES_PER_SUBSET=200 (LoFTR default; v13 train list
+is LoFTR official train_list.txt = 153 scene / 368 npz / 8.86M pair pool).
+4-GPU get_local_split shards npz at scene level (data.py L320), so each rank
+gets ~92 npz * 200 = 18.4K pair pre-shuffle per ep, /bs=4 = 4600 step / rank
+/ ep. Acceptable density for fine-tuning from outdoor.ckpt; no need to push
+higher (LoFTR original recipe).
+
+Val: LoFTR official val_list.txt is too large for 12-ep DDP (147K-pair
+npz `0022_0.1_0.3` alone), so v13 uses a 2-line truncation (Trevi
+``0015_0.3_0.5`` + Pantheon ``0022_0.5_0.7`` = 4493 pair) plus
+``--limit_val_batches=0.5`` from the run script -> 2247 pair effective val
+each epoch. Still > LoFTR megadepth_val_1500 baseline (1500 pair) so
+best-ckpt selection signal is unaffected.
 
 Acceptance (set in §6 of plan; reproduced here for grep-ability):
   Strong : METU all auc@20 >= 0.05 (5x of v10's 0.87%)

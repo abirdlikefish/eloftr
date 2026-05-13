@@ -269,28 +269,27 @@ REM     so you see one line per pair in real time
 REM   - figures saved to <SUB_OUT>\figures\ (capped at --max_figs)
 REM   - overall.txt + summary.csv written by the python script itself
 REM
-REM Default backend = OpenCV RANSAC at thr=2.0. Empirically (30-pair smoke
-REM test on v10 ckpt) LO-RANSAC produces statistically identical auc but
-REM is ~30% slower; switch to LO-RANSAC by editing RANSAC_FLAG below
-REM (requires `pip install poselib`).
-set "RANSAC_FLAG=--ransac RANSAC --ransac_thr 2.0 --ransac_times 5"
+REM RANSAC protocol aligned with eval_metu_vistir_official.bat (MINIMA /
+REM XoFTR test_relative_pose_infrared.py): ransac_thr=1.5, single shot.
+REM Note: results/eval_summary.md §6 v0..v12 METU rows were computed under
+REM the older ransac_thr=2.0 / 5-restart protocol; those numbers are NO
+REM LONGER directly comparable to fresh runs after this protocol switch
+REM and need a rerun for cross-version comparison with the new ELoFTR
+REM baseline (eval_metu_vistir_official.bat).
+set "RANSAC_FLAG=--ransac RANSAC --ransac_thr 1.5 --ransac_times 1"
 
 REM Cap on saved figures per subset (set 0 to disable figures entirely).
 set "MAX_FIGS=10"
 
 REM ====================================================================
-REM  SUBSETS: 想跑哪几个子集就留哪几个; 直接改这一行
-REM     all           : 2590 pair (10 npz)
-REM     cloudy_cloudy : 1382 pair (6 npz, 同光照, 较易)
-REM     cloudy_sunny  : 1208 pair (4 npz, 跨光照, 最难)
-REM
-REM  例:
-REM     set "SUBSETS=all cloudy_cloudy cloudy_sunny"   REM 全部 (默认, 完整 eval)
-REM     set "SUBSETS=cloudy_cloudy"                    REM 只同光照
-REM     set "SUBSETS=cloudy_sunny"                     REM 只跨光照
-REM     set "SUBSETS=all"                              REM 只跑 all
+REM  SUBSETS: under the new MINIMA protocol visualize_metu_vistir.py
+REM  already groups per-npz AUC into cloudy_cloudy / cloudy_sunny /
+REM  all_class_mean inside a single full-set run, so SUBSETS=all is
+REM  enough (per-class breakdown appears in overall.txt). The 3-subset
+REM  loop is kept as a smoke convenience but produces redundant per-class
+REM  rows.
 REM ====================================================================
-set "SUBSETS=all cloudy_cloudy cloudy_sunny"
+set "SUBSETS=all"
 
 REM ====================================================================
 REM  STRIDE: 步长抽样, 加速 smoke / sanity test
@@ -329,6 +328,7 @@ for %%S in (%SUBSETS%) do (
       !RANSAC_FLAG! ^
       --max_figs !MAX_FIGS! ^
       --thr 0.2 ^
+      --megasize 640 ^
       --stride !STRIDE! ^
       --num_workers 8
 

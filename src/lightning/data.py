@@ -112,6 +112,11 @@ class MultiSceneDataModule(pl.LightningDataModule):
         self.metu_undistort = getattr(config.DATASET, 'METU_UNDISTORT', True)
         self.metu_side0 = getattr(config.DATASET, 'METU_SIDE0', 'vis')
         self.metu_side1 = getattr(config.DATASET, 'METU_SIDE1', 'thermal')
+        # MINIMA protocol: bs=1 eval runs matcher without pad-to-square so that
+        # ELoFTR forward sees each pair at its undistorted+resized H/W (no zero
+        # seam). Default False matches MINIMA; set True for bs>1 eval where
+        # default_collate needs uniform shapes.
+        self.metu_pad_to_square = getattr(config.DATASET, 'METU_PAD_TO_SQUARE', False)
 
         # Megadepth_Syn_Pose (v13) options. Defaults match the dataset class
         # signature so v0..v12 cfgs that don't set them stay byte-identical
@@ -399,6 +404,7 @@ class MultiSceneDataModule(pl.LightningDataModule):
                         undistort=self.metu_undistort,
                         side0=self.metu_side0,
                         side1=self.metu_side1,
+                        pad_to_square=self.metu_pad_to_square,
                         use_edge_input=self.use_edge_input,
                         use_clahe_ir=self.use_clahe_ir,
                         use_clahe_vis=self.use_clahe_vis,

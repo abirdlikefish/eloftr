@@ -33,8 +33,8 @@ export CUDA_VISIBLE_DEVICES=0
 for p in data/Megadepth_Syn/train/infrared \
          data/Megadepth_Syn/train/phoenix \
          data/Megadepth_Syn/index/scene_info_pose \
-         data/Megadepth_Syn/index/trainvaltest_list_pose/train_list_pose.txt \
-         data/Megadepth_Syn/index/trainvaltest_list_pose/val_list_pose.txt \
+         data/Megadepth_Syn/index/trainvaltest_list_src/train_list.txt \
+         data/Megadepth_Syn/index/val_list_loftr_small.txt \
          weights/eloftr_outdoor.ckpt; do
     [ -e "$p" ] || { echo "[v13 smoke prereq] missing: $p"; exit 1; }
 done

@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+from collections import OrderedDict, defaultdict
 from pathlib import Path
 from typing import Dict, List
 
@@ -51,8 +52,8 @@ from src.config.default import get_cfg_defaults
 from src.lightning.data import MultiSceneDataModule
 from src.loftr import LoFTR
 from src.utils.metrics import (
-    aggregate_metrics,
     compute_symmetrical_epipolar_errors,
+    error_auc,
     estimate_pose,
     relative_pose_error,
 )
@@ -514,39 +515,120 @@ def main() -> None:
             writer.writeheader()
             writer.writerows(rows)
 
-    # ---- overall.txt via aggregate_metrics ---------------------------------
-    metrics_dict = {
-        'identifiers': identifiers,
-        'epi_errs': all_epi,
-        'R_errs': all_R,        # flat over ransac_times restarts per pair
-        't_errs': all_t,
-        'inliers': all_inliers,  # not actually consumed by aggregate_metrics
-        'num_matches': all_n_matches,
+    # ---- overall.txt via MINIMA-style aggregation --------------------------
+    # MINIMA / XoFTR test_relative_pose_infrared.py: per-npz error_auc -> split
+    # ('_scene')[0] class-mean -> two-class final mean. NOT the legacy pooled
+    # `aggregate_metrics` which flattens all 2590 pair errors into a single AUC
+    # (pair-weighted, biased toward npz with more pairs).
+    ransac_times = max(1, int(args.ransac_times))
+    n_pair = len(identifiers)
+    if len(all_R) != n_pair * ransac_times or len(all_t) != n_pair * ransac_times:
+        raise RuntimeError(
+            f"flat R/t length mismatch: len(all_R)={len(all_R)}, "
+            f"len(all_t)={len(all_t)}, expected n_pair*ransac_times="
+            f"{n_pair}*{ransac_times}={n_pair * ransac_times}")
+    R_arr = np.array(all_R, dtype=np.float64).reshape(n_pair, ransac_times)
+    t_arr = np.array(all_t, dtype=np.float64).reshape(n_pair, ransac_times)
+    # MINIMA pose error = max(R, t) per single ransac call; we keep
+    # per-pair "best across restarts" = min over restarts of max(R, t).
+    # ransac_times=1 (MINIMA-exact) reduces to single-shot max(R, t).
+    pose_err_per_pair = np.min(np.maximum(R_arr, t_arr), axis=1)
+
+    # per-scene buckets (scene_id is the npz name without .npz, e.g.
+    # 'cloudy_cloudy_scene_1'). identifier format = '{scene_id}#{pair_id}'.
+    scene_to_pose_errs: Dict[str, List[float]] = defaultdict(list)
+    scene_to_n_pairs: Dict[str, int] = defaultdict(int)
+    for ident, pe in zip(identifiers, pose_err_per_pair):
+        scene_name = ident.split('#')[0]
+        scene_to_pose_errs[scene_name].append(float(pe))
+        scene_to_n_pairs[scene_name] += 1
+
+    # per-scene AUC. error_auc returns 0..1; multiply by 100 to align with
+    # MINIMA paper Table 3 percentage units.
+    scene_aucs: "OrderedDict[str, dict]" = OrderedDict()
+    for scene_name in sorted(scene_to_pose_errs.keys()):
+        aucs_dict = error_auc(scene_to_pose_errs[scene_name], [5, 10, 20])
+        scene_aucs[scene_name] = {
+            'auc@5':  100.0 * float(aucs_dict['auc@5']),
+            'auc@10': 100.0 * float(aucs_dict['auc@10']),
+            'auc@20': 100.0 * float(aucs_dict['auc@20']),
+            'pairs':  scene_to_n_pairs[scene_name],
+        }
+
+    # per-class AUC: split('_scene')[0] yields 'cloudy_cloudy' / 'cloudy_sunny'
+    # (mirrors XoFTR aggregiate_scenes). Simple arithmetic mean within class.
+    class_to_scenes: Dict[str, List[str]] = defaultdict(list)
+    for scene_name in scene_aucs.keys():
+        cls = scene_name.split('_scene')[0]
+        class_to_scenes[cls].append(scene_name)
+    class_aucs: "OrderedDict[str, dict]" = OrderedDict()
+    for cls in sorted(class_to_scenes.keys()):
+        class_aucs[cls] = {
+            f'auc@{t}': float(np.mean([scene_aucs[s][f'auc@{t}']
+                                       for s in class_to_scenes[cls]]))
+            for t in (5, 10, 20)
+        }
+
+    # overall: 2-class arithmetic mean ↔ MINIMA paper Table 3 row.
+    all_class_mean = {
+        f'auc@{t}': float(np.mean([cls_d[f'auc@{t}']
+                                   for cls_d in class_aucs.values()]))
+        for t in (5, 10, 20)
     }
-    aucs = aggregate_metrics(metrics_dict, cfg.TRAINER.EPI_ERR_THR, config=cfg)
+    mean_num_matches = float(np.mean(all_n_matches)) if all_n_matches else 0.0
 
     overall_path = out_dir / "overall.txt"
     with overall_path.open("w", encoding="utf-8") as f:
+        f.write("protocol: MINIMA / XoFTR (test_relative_pose_infrared.py)\n")
         f.write(f"ckpt: {ckpt_path}\n")
         f.write(f"main_cfg: {args.main_cfg}\n")
         f.write(f"data_cfg: {args.data_cfg}\n")
-        f.write(f"pairs: {len(rows)}\n")
-        f.write(f"side0: {cfg.DATASET.METU_SIDE0}  side1: {cfg.DATASET.METU_SIDE1}\n")
-        f.write(f"undistort: {cfg.DATASET.METU_UNDISTORT}\n")
+        f.write(f"pairs: {len(rows)}  scenes: {len(scene_aucs)}\n")
+        f.write(f"side0: {cfg.DATASET.METU_SIDE0}  "
+                f"side1: {cfg.DATASET.METU_SIDE1}\n")
+        f.write(f"undistort: {cfg.DATASET.METU_UNDISTORT} "
+                f"(getOptimalNewCameraMatrix alpha=0)\n")
+        f.write(f"pad_to_square: "
+                f"{getattr(cfg.DATASET, 'METU_PAD_TO_SQUARE', False)}\n")
         f.write(f"ransac: {args.ransac}  thr: {args.ransac_thr}  "
                 f"times: {args.ransac_times}\n")
-        f.write(f"loftr_thr: {cfg.LOFTR.MATCH_COARSE.THR}\n")
-        f.write(f"epi_err_thr: {cfg.TRAINER.EPI_ERR_THR}\n")
+        f.write(f"loftr_thr: {cfg.LOFTR.MATCH_COARSE.THR}  "
+                f"megasize: {cfg.DATASET.MGDPT_IMG_RESIZE}\n")
         f.write("---\n")
-        for k, v in aucs.items():
-            f.write(f"{k}: {float(v):.6f}\n")
+        f.write("[per-scene] (units: %)\n")
+        for scene_name, d in scene_aucs.items():
+            f.write(f"  {scene_name:34s}  auc@5: {d['auc@5']:6.3f}  "
+                    f"auc@10: {d['auc@10']:6.3f}  "
+                    f"auc@20: {d['auc@20']:6.3f}  "
+                    f"pairs: {d['pairs']}\n")
+        f.write("---\n")
+        f.write("[per-class] (XoFTR aggregiate_scenes equivalent, units: %)\n")
+        for cls, d in class_aucs.items():
+            f.write(f"  {cls:34s}  auc@5: {d['auc@5']:6.3f}  "
+                    f"auc@10: {d['auc@10']:6.3f}  "
+                    f"auc@20: {d['auc@20']:6.3f}\n")
+        f.write("---\n")
+        f.write("[overall] (units: %)\n")
+        f.write(f"  all_class_mean                      "
+                f"auc@5: {all_class_mean['auc@5']:6.3f}  "
+                f"auc@10: {all_class_mean['auc@10']:6.3f}  "
+                f"auc@20: {all_class_mean['auc@20']:6.3f}"
+                f"   # compare with MINIMA paper Table 3 ELoFTR: 2.88 / 7.88 / 17.72\n")
+        f.write(f"num_matches: {mean_num_matches:.2f}\n")
 
     print("", flush=True)
     print("============================================================", flush=True)
-    print(f"  pairs        : {len(rows)}", flush=True)
-    aucs_show = {k: float(v) for k, v in aucs.items()}
-    for k, v in aucs_show.items():
-        print(f"  {k:13s}: {v:.4f}", flush=True)
+    print(f"  pairs        : {len(rows)}   scenes: {len(scene_aucs)}", flush=True)
+    print(f"  per-class auc@5 / @10 / @20 (units: %):", flush=True)
+    for cls, d in class_aucs.items():
+        print(f"    {cls:18s}  {d['auc@5']:6.3f}  {d['auc@10']:6.3f}  "
+              f"{d['auc@20']:6.3f}", flush=True)
+    print(f"  all_class_mean      "
+          f"{all_class_mean['auc@5']:6.3f}  "
+          f"{all_class_mean['auc@10']:6.3f}  "
+          f"{all_class_mean['auc@20']:6.3f}   "
+          f"(paper Table 3 ELoFTR: 2.88 / 7.88 / 17.72)", flush=True)
+    print(f"  num_matches  : {mean_num_matches:.2f}", flush=True)
     print(f"  summary.csv  : {csv_path}", flush=True)
     print(f"  overall.txt  : {overall_path}", flush=True)
     if save_fig:

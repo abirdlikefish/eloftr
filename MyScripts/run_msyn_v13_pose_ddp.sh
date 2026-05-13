@@ -73,8 +73,8 @@ fi
 for p in data/Megadepth_Syn/train/infrared \
          data/Megadepth_Syn/train/phoenix \
          data/Megadepth_Syn/index/scene_info_pose \
-         data/Megadepth_Syn/index/trainvaltest_list_pose/train_list_pose.txt \
-         data/Megadepth_Syn/index/trainvaltest_list_pose/val_list_pose.txt \
+         data/Megadepth_Syn/index/trainvaltest_list_src/train_list.txt \
+         data/Megadepth_Syn/index/val_list_loftr_small.txt \
          weights/eloftr_outdoor.ckpt; do
     [ -e "$p" ] || { echo "[v13 prereq] missing: $p"; exit 1; }
 done
@@ -92,7 +92,7 @@ python train.py \
   --check_val_every_n_epoch=1 \
   --log_every_n_steps=50 \
   --limit_train_batches=1.0 \
-  --limit_val_batches=1.0 \
+  --limit_val_batches=0.5 \
   --num_sanity_val_steps=0 \
   --max_epochs=12 \
   --disable_mp \

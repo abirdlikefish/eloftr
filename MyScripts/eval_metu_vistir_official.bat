@@ -1,16 +1,30 @@
 @echo off
 REM ============================================================
 REM  eval_metu_vistir_official.bat
-REM  Evaluate the official outdoor.ckpt (real-multiview RGB-RGB MegaDepth
-REM  training) on METU_VISTIR (real-multiview RGB-LWIR test). Serves as
-REM  a baseline for v10/v11 cross-modal training -- if v10 ckpt does not
-REM  beat outdoor.ckpt on METU, the cross-modal training did not transfer
-REM  to real LWIR.
+REM  Evaluate the official outdoor.ckpt (RGB-RGB MegaDepth training) on
+REM  METU_VISTIR (real-captured drone VIS+LWIR pairs). Serves as the
+REM  ELoFTR baseline cited by MINIMA paper Table 3 (2.88 / 7.88 / 17.72).
 REM
-REM  Three subsets: all / cloudy_cloudy / cloudy_sunny  (same protocol
-REM  as eval_metu_vistir_finetuned.bat).
+REM  Protocol: MINIMA / XoFTR test_relative_pose_infrared.py (CVPR 2025)
+REM    - ransac_thr=1.5, ransac_times=1 (single estimate_pose call)
+REM    - long edge = 640 (paper Sec 5.1: "long dimension equal to 640")
+REM    - LOFTR.MATCH_COARSE.THR = 0.2 (MINIMA load_loftr default)
+REM    - NPE off (test long edge 640 < train 832; no extrapolation needed)
+REM    - side0=vis / side1=thermal (mirrors MINIMA load_vis_tir_pairs_npz)
+REM    - undistort via cv2.getOptimalNewCameraMatrix alpha=0 -> new_K
+REM      (dataset side, see src/datasets/metu_vistir.py L254-273)
+REM    - pad_to_square=False (dataset default; bs=1 forward at native shape)
+REM    - AUC: per-npz error_auc -> split('_scene')[0] class mean ->
+REM      2-class mean (all_class_mean = paper Table 3 row)
 REM
-REM  Output: dump\metu_eval_official\{all,cloudy_cloudy,cloudy_sunny}\overall.txt
+REM  History: prior protocol mirrored ELoFTR outdoor_full_auc.sh
+REM  (RGB-RGB MegaDepth-1500: ransac_thr=0.5 / 5-restart / megasize=1152
+REM  + NPE / pool 2590 pair into single error_auc). That underestimated
+REM  METU AUC by ~10-20x and is no longer used. See plan
+REM  align-metu-eval-minima_*.plan.md for protocol audit details.
+REM
+REM  Output: dump\metu_eval_official\all\overall.txt (single full set run;
+REM  per-class breakdown is computed inside python from per-scene AUCs).
 REM ============================================================
 setlocal enabledelayedexpansion
 
@@ -58,55 +72,46 @@ echo   Eval set   : METU_VISTIR  (official outdoor.ckpt baseline)
 echo   Ckpt       : !OFFICIAL_CKPT!
 echo   Cfg (LoFTR): !FT_CFG!
 echo   Out dir    : !OUT_DIR!
-echo   Protocol   : ransac_thr=0.5  thr=0.1  megasize=1152  npe=on
-echo                side0=vis  side1=thermal  (mirrors outdoor_full_auc.sh)
+echo   Protocol   : MINIMA / XoFTR (CVPR 2025)
+echo                ransac_thr=1.5  times=1  thr=0.2  megasize=640  npe=off
+echo                side0=vis  side1=thermal  pad_to_square=False
+echo                target: paper Table 3 ELoFTR = 2.88 / 7.88 / 17.72
 echo ============================================================
 echo.
 
 REM Each call drives MyScripts/visualize_metu_vistir.py: progress prints to
 REM this cmd window in real time; figures saved to <SUB_OUT>\figures\;
 REM overall.txt + summary.csv written by the python script.
-REM
-REM ====================================================================
-REM  RANSAC_FLAG: 官方 outdoor_full_auc.sh 用 ransac_thr=0.5 (像素阈值,
-REM  作用在归一化坐标系 K^-1 后, 经验上 0.5 是 MegaDepth/METU 这类外景
-REM  的标准 AUC 复现值). 我们之前用的 2.0 = 4x 偏松 -> RANSAC 把 outlier
-REM  当 inlier 喂给 essential matrix -> R/t 估计漂移 -> AUC 大幅低估.
-REM  ransac_times=5 沿用官方 EVAL_TIMES=5 (5 次随机种子 RANSAC 取最好).
-REM ====================================================================
-set "RANSAC_FLAG=--ransac RANSAC --ransac_thr 0.5 --ransac_times 5"
+
+REM RANSAC: MINIMA / XoFTR protocol = thr 1.5, single shot.
+set "RANSAC_FLAG=--ransac RANSAC --ransac_thr 1.5 --ransac_times 1"
 set "MAX_FIGS=10"
 
-REM ====================================================================
-REM  OFFICIAL_PROTOCOL: 复现 outdoor.ckpt 的 4 个关键参数 (与 finetuned
-REM  ckpts 故意不一致, finetuned 走 metu_vistir_test_*.py cfg 默认值)
+REM OFFICIAL_PROTOCOL (MINIMA / XoFTR test_relative_pose_infrared.py):
+REM   --thr 0.2         MATCH_COARSE.THR matches MINIMA load_loftr default
+REM                     + eloftr_full.py cfg ("recommend 0.2 for full model")
+REM   --megasize 640    paper Sec 5.1 "long dimension equal to 640"
+REM                     (no --npe: test long edge 640 < train 832, no need)
+REM   --metu_side0 vis  image0 = visible side (mirrors MINIMA load_vis_tir_pairs_npz
+REM   --metu_side1 thermal   image_paths[id0][0]=visible, [id1][1]=thermal)
 REM
-REM    --thr 0.1            ^ MATCH_COARSE.THR; 官方 outdoor_full_auc.sh
-REM                           显式 --thr 0.1, NOT cfg 注释里的 0.2.
-REM    --megasize 1152      ^ 长边 resize=1152 (cfg 默认 832); METU 4K 图
-REM                           保留更多纹理, 跨模态匹配关键.
-REM    --npe                ^ 启用 NPE = [832,832,1152,1152]; 告诉 RoPE
-REM                           "训练在 832, 测试在 1152", 频率正确外推.
-REM                           必须配 --megasize 1152 一起用.
-REM    --metu_side0 vis     ^ image0=vis, image1=thermal; outdoor.ckpt 是
-REM    --metu_side1 thermal   纯 RGB 训练 (无 modemb), 经验上 vis-as-image0
-REM                           比 thermal-as-image0 (cfg 默认) 高 ~4x AUC.
-REM ====================================================================
-set "OFFICIAL_PROTOCOL=--thr 0.1 --megasize 1152 --npe --metu_side0 vis --metu_side1 thermal"
+REM Note: prior protocol used --thr 0.1 --megasize 1152 --npe which is
+REM ELoFTR's RGB-RGB MegaDepth-1500 reproduce config (outdoor_full_auc.sh);
+REM that drastically under-reports METU AUC. See plan
+REM align-metu-eval-minima_*.plan.md.
+set "OFFICIAL_PROTOCOL=--thr 0.2 --megasize 640 --metu_side0 vis --metu_side1 thermal"
 
 REM ====================================================================
-REM  SUBSETS: 想跑哪几个子集就留哪几个; 直接改这一行
-REM     all           : 2590 pair (10 npz)
-REM     cloudy_cloudy : 1382 pair (6 npz, 同光照, 较易)
-REM     cloudy_sunny  : 1208 pair (4 npz, 跨光照, 最难)
-REM
-REM  例:
-REM     set "SUBSETS=all cloudy_cloudy cloudy_sunny"   REM 全部 (默认, 完整 eval)
-REM     set "SUBSETS=cloudy_cloudy"                    REM 只同光照
-REM     set "SUBSETS=cloudy_sunny"                     REM 只跨光照
-REM     set "SUBSETS=all"                              REM 只跑 all
+REM  SUBSETS: under MINIMA protocol the visualize_metu_vistir.py python
+REM  end already groups per-npz AUC into cloudy_cloudy / cloudy_sunny /
+REM  all_class_mean in a single full-set run. The 3 subsets (all /
+REM  cloudy_cloudy / cloudy_sunny) on the data-cfg level are now redundant
+REM  (cloudy_cloudy.txt and cloudy_sunny.txt rows will appear inside the
+REM  'all' run's overall.txt [per-class] section). Keep SUBSETS=all by
+REM  default; the other two are left as a smoke-test convenience.
 REM ====================================================================
-set "SUBSETS=cloudy_cloudy"
+set "SUBSETS=all"
+
 
 REM ====================================================================
 REM  STRIDE: 步长抽样, 加速 smoke / sanity test

@@ -135,6 +135,7 @@ class METUVisTIRDataset(utils_data.Dataset):
         undistort: bool = True,
         side0: str = 'vis',
         side1: str = 'thermal',
+        pad_to_square: bool = False,
         # v7+ pcclahe knobs (defaults disabled; v0/v6.1/baseline ckpt
         # eval byte-identical, only v7+/v9+/v10/v11 ckpts flip these on).
         use_edge_input: bool = False,
@@ -166,6 +167,7 @@ class METUVisTIRDataset(utils_data.Dataset):
         self.undistort = bool(undistort)
         self.side0 = side0
         self.side1 = side1
+        self.pad_to_square = bool(pad_to_square)
         self.fp16 = bool(fp16)
 
         # NOTE: scene_info_test/ contains 4 dataset-author files
@@ -251,16 +253,26 @@ class METUVisTIRDataset(utils_data.Dataset):
         if img1_raw is None:
             raise FileNotFoundError(f"METU read failed (image1 {self.side1}): {img1_path}")
 
-        # 4. Undistort BEFORE resize. K is unchanged because cv2.undistort
-        # output preserves the input intrinsics (output rays go through
-        # the same focal length / principal point). Black-border pixels
-        # outside the original FOV become 0; the pad-mask path below
-        # only marks "padded canvas" as invalid -- if you observe poor
-        # auc with strong distortion, intersect mask0/mask1 with
-        # (img > 0) before pad. Skipped in v0 to keep the path simple.
+        # 4. Undistort BEFORE resize, MINIMA-style (data_io_loftr.py L34-37):
+        #    new_K = getOptimalNewCameraMatrix(K, dist, (w,h), alpha=0, (w,h))
+        #    img = cv2.undistort(img, K, dist, None, new_K)
+        # Why alpha=0 + same size (w,h): keep only fully-valid pixel region
+        # (no black borders from FOV margins); new_K's focal grows slightly
+        # to fill the same canvas. Critical for matching MINIMA's reported
+        # METU-VisTIR numbers; the older `cv2.undistort(img, K, d)` form
+        # (newCameraMatrix=None → K unchanged) leaves black borders + uses
+        # the original K downstream, yielding a different pose-estimation
+        # geometry by ~1.3-2x AUC. K is OVERWRITTEN by new_K below so
+        # estimate_pose sees the correct intrinsics.
         if self.undistort:
-            img0_raw = cv2.undistort(img0_raw, K0, d0)
-            img1_raw = cv2.undistort(img1_raw, K1, d1)
+            h0_pre, w0_pre = img0_raw.shape
+            new_K0, _ = cv2.getOptimalNewCameraMatrix(K0, d0, (w0_pre, h0_pre), 0, (w0_pre, h0_pre))
+            img0_raw = cv2.undistort(img0_raw, K0, d0, None, new_K0)
+            K0 = new_K0
+            h1_pre, w1_pre = img1_raw.shape
+            new_K1, _ = cv2.getOptimalNewCameraMatrix(K1, d1, (w1_pre, h1_pre), 0, (w1_pre, h1_pre))
+            img1_raw = cv2.undistort(img1_raw, K1, d1, None, new_K1)
+            K1 = new_K1
 
         h0_raw, w0_raw = img0_raw.shape
         h1_raw, w1_raw = img1_raw.shape
@@ -307,37 +319,60 @@ class METUVisTIRDataset(utils_data.Dataset):
             pc0 = compute_pc_v11_runtime(img0_for_pc, target_hw=(h0_r, w0_r))
             pc1 = compute_pc_v11_runtime(img1_for_pc, target_hw=(h1_r, w1_r))
 
-        # 9. Pad to common square canvas (for batch_size>1 collate; bs=1
-        # in eval but we keep the shape uniform across pairs anyway so
-        # PL trainer.test sees a well-defined batch shape).
-        pad_size = max(self.img_resize,
-                       ((self.img_resize + self.df - 1) // self.df) * self.df)
-        img0_pad, mask0 = pad_bottom_right(img0, pad_size, ret_mask=True)
-        img1_pad, mask1 = pad_bottom_right(img1, pad_size, ret_mask=True)
-        if self.use_edge_input:
-            pc0_pad, _ = pad_bottom_right(pc0, pad_size, ret_mask=False)
-            pc1_pad, _ = pad_bottom_right(pc1, pad_size, ret_mask=False)
-            image0_np = np.stack([img0_pad, pc0_pad], axis=0)        # (2, P, P)
-            image1_np = np.stack([img1_pad, pc1_pad], axis=0)
+        # 9. Optional pad-to-square canvas. MINIMA's reference protocol runs
+        # matcher with padding=False at bs=1 (each pair forwards through
+        # ELoFTR at its own H/W); zero-padding near image seam slightly
+        # perturbs RepVGG/coarse-attention features, so default pad_to_square
+        # is False here (matches MINIMA). Set True only if you run METU eval
+        # with bs>1 (then default_collate needs uniform shapes).
+        if self.pad_to_square:
+            pad_size = max(self.img_resize,
+                           ((self.img_resize + self.df - 1) // self.df) * self.df)
+            img0_pad, mask0 = pad_bottom_right(img0, pad_size, ret_mask=True)
+            img1_pad, mask1 = pad_bottom_right(img1, pad_size, ret_mask=True)
+            if self.use_edge_input:
+                pc0_pad, _ = pad_bottom_right(pc0, pad_size, ret_mask=False)
+                pc1_pad, _ = pad_bottom_right(pc1, pad_size, ret_mask=False)
+                image0_np = np.stack([img0_pad, pc0_pad], axis=0)        # (2, P, P)
+                image1_np = np.stack([img1_pad, pc1_pad], axis=0)
+            else:
+                image0_np = img0_pad[None]                               # (1, P, P)
+                image1_np = img1_pad[None]
         else:
-            image0_np = img0_pad[None]                               # (1, P, P)
-            image1_np = img1_pad[None]
+            if self.use_edge_input:
+                image0_np = np.stack([img0, pc0], axis=0)                # (2, H0_r, W0_r)
+                image1_np = np.stack([img1, pc1], axis=0)
+            else:
+                image0_np = img0[None]                                   # (1, H0_r, W0_r)
+                image1_np = img1[None]
+            mask0 = np.ones(img0.shape, dtype=bool)                      # full-valid; df-aligned
+            mask1 = np.ones(img1.shape, dtype=bool)
 
         image0 = torch.from_numpy(image0_np).float() / 255.0
         image1 = torch.from_numpy(image1_np).float() / 255.0
         mask0_t = torch.from_numpy(mask0).bool()
         mask1_t = torch.from_numpy(mask1).bool()
 
-        # 10. Coarse-scale mask (same recipe as MegaDepthDataset:125-131
-        # and RoadSceneDataset:639-644).
+        # 10. Coarse-scale mask. Stack-based downsample only works when
+        # mask0/mask1 share the same H/W (pad_to_square=True case). Under
+        # the MINIMA-default pad_to_square=False, image0 (vis) and image1
+        # (thermal) typically differ in H even after the long-edge 640
+        # resize (e.g. 360x640 vs 512x640), so interpolate each mask
+        # independently. Same recipe as MegaDepthDataset:125-131 /
+        # RoadSceneDataset:639-644 otherwise.
         if self.coarse_scale and self.coarse_scale != 1.0:
-            ts_masks = F.interpolate(
-                torch.stack([mask0_t, mask1_t], dim=0)[None].float(),
+            mask0_c = F.interpolate(
+                mask0_t[None, None].float(),
                 scale_factor=self.coarse_scale,
                 mode='nearest',
                 recompute_scale_factor=False,
-            )[0].bool()
-            mask0_c, mask1_c = ts_masks[0], ts_masks[1]
+            )[0, 0].bool()
+            mask1_c = F.interpolate(
+                mask1_t[None, None].float(),
+                scale_factor=self.coarse_scale,
+                mode='nearest',
+                recompute_scale_factor=False,
+            )[0, 0].bool()
         else:
             mask0_c, mask1_c = mask0_t, mask1_t
 
