@@ -35,22 +35,21 @@ npz schema (confirmed by tmp_npz_check.py 2026-05-11):
 Pair semantics: image-list + pair-index (matches MegaDepth's contract;
 N_pair != N_image, e.g. cloudy_cloudy_scene_1 has 300 images / 131 pairs).
 
-    T_0to1 = inv(poses[idx1]) @ poses[idx0]
+    T_0to1 = poses[idx1] @ inv(poses[idx0])      # MegaDepth W2C convention
 
-CRITICAL: METU ``poses[idx]`` is **camera-to-world (C2W)**, not the
-world-to-camera (W2C) used by MegaDepthDataset. Confirmed via debug
-sweep over 4 candidate formulas (tmp_metu_debug.py; v10 ckpt on
-cloudy_cloudy_scene_1 pair 0):
+This matches MINIMA's load_vis_tir_pairs_npz (test_relative_pose_infrared.py
+L62-66) and MegaDepthDataset.__getitem__ -- consistent with the npz header
+``poses : world->cam absolute pose`` (W2C).
 
-    A: P1 @ inv(P0)        R_err=38.6  t_err=54.5  (W2C, MegaDepth standard)
-    B: inv(P1) @ P0        R_err=11.6  t_err=34.6  (C2W -- correct for METU)
-    C: P0 @ inv(P1)        R_err=11.9  t_err=34.4  (swap of B, equivalent under
-                                                     E ambiguity for unit t)
-    D: inv(P0) @ P1        R_err=38.7  t_err=55.4
-
-So we use formula B. The user's earlier docstring claim that
-``poses[i] = T_vis->thermal`` is incorrect (poses is per-image, not
-per-pair).
+History: a 30-pair sweep on v10 ckpt over 4 candidate formulas reported in
+an earlier docstring revision concluded "use inv(P1) @ P0 (C2W)" because
+it gave R_err=11.6 deg vs 38.6 deg for P1 @ inv(P0). That call was wrong:
+both R_errs were in the regime of severely-mis-estimated pose (v10 ckpt
+on real LWIR is OOD), so "less wrong" is not "geometrically correct". The
+real fix that aligned dump\metu_eval_official with MINIMA paper Table 3
+ELoFTR was switching back to the MegaDepth W2C formula (this current
+implementation). poses is per-image (vis & thermal share pose at the
+same image-index, METU stereo capture).
 
 Output dict (MegaDepth-style; consumed by test.py via test_step ->
 _compute_metrics -> compute_symmetrical_epipolar_errors +
@@ -67,6 +66,7 @@ compute_pose_errors):
     scale0     : (2,) float32, [w_raw/w_resized, h_raw/h_resized]
     scale1     : (2,) float32, same.
     T_0to1     : (4, 4) float32, T_0to1 = poses[idx1] @ inv(poses[idx0])
+                  (MegaDepth W2C convention; matches MINIMA).
     T_1to0     : (4, 4) float32, inv(T_0to1)
     depth0     : torch.tensor([])  (METU has no depth; metrics path
                   doesn't read it)
@@ -234,13 +234,19 @@ class METUVisTIRDataset(utils_data.Dataset):
         d0 = self._distortion_coefs[idx0, col0].astype(np.float64).copy()
         d1 = self._distortion_coefs[idx1, col1].astype(np.float64).copy()
 
-        # 2. T_0to1 = inv(P1) @ P0  (C2W convention -- METU stores
-        # camera-to-world, NOT MegaDepth's W2C). See module docstring for
-        # the 4-candidate sweep that proved this; using the wrong
-        # formula yields ~3x larger R/t errors (40 deg vs 12 deg).
-        P0 = self._poses[idx0].astype(np.float64)   # C2W
-        P1 = self._poses[idx1].astype(np.float64)   # C2W
-        T_0to1 = np.linalg.inv(P1) @ P0
+        # 2. T_0to1 = P1 @ inv(P0)  (MegaDepth-standard W2C convention,
+        # mirrors MINIMA load_vis_tir_pairs_npz +
+        # MegaDepthDataset.__getitem__). The 30-pair sweep recorded in
+        # the module docstring (4-candidate B vs A) was run on a v10 ckpt
+        # and BOTH formulas gave large R_err (11.6 deg vs 38.6 deg) -- B
+        # was "less wrong", not geometrically correct. The npz docstring
+        # itself states ``poses : world->cam`` (= W2C), which mandates the
+        # MegaDepth formula here. Switching to this formula is the key fix
+        # to align dump\metu_eval_official numbers with MINIMA paper Table
+        # 3 ELoFTR baseline (2.88 / 7.88 / 17.72).
+        P0 = self._poses[idx0].astype(np.float64)   # W2C
+        P1 = self._poses[idx1].astype(np.float64)   # W2C
+        T_0to1 = P1 @ np.linalg.inv(P0)
         T_1to0 = np.linalg.inv(T_0to1)
 
         # 3. Read images (grayscale).

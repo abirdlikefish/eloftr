@@ -37,12 +37,18 @@
 #   4. Eyes-on visual sanity (optional but recommended before ship):
 #      python MyScripts/visualize_megadepth_syn_pose_pairs.py --split train --n_pairs 10 --seed 42
 #
-# DDP schedule (matches v10 ddp wall-clock ~17h):
+# DDP schedule (bs=2 reverse-scaled to TRUE_LR=1.25e-4 same as v10; ~35h ship):
 #   max_epochs=12, ES patience=3, MSLR=[3,5,7], MSLR_GAMMA=0.5
-#   bs=4 x 4 GPU = effective_bs=16 -> _scaling=0.25
-#   CANONICAL_LR=5e-4 -> TRUE_LR=1.25e-4
-#   WARMUP_STEP=450  -> actual 1800 step (~0.25 ep)
+#   bs=2 x 4 GPU = effective_bs=8 -> _scaling=0.125
+#   CANONICAL_LR=1e-3 -> TRUE_LR=1.25e-4
+#   WARMUP_STEP=225  -> actual 1800 step (~0.2 ep)
 #   N_SAMPLES_PER_SUBSET=200 (LoFTR default), SB_SUBSET_SAMPLE_REPLACEMENT=False
+#   --limit_val_batches=0.5 (val 4493 pair * 0.5 = 2247 effective)
+#
+# Why bs=2: 832 path coarse_matching's sim_matrix is (bs, 10816, 10816)
+# fp32 = 1.87 GB per batch. AGG_SIZE=4 only helps attention, NOT
+# coarse_matching's dual-softmax. bs=4 hits ~22 GB / 24 GB on 3090, OOM-prone
+# (verified 2026-05-13 LoFTR-split ship). bs=2 brings stable ~16 GB headroom.
 #
 # Acceptance (METU all auc@20):
 #   Strong : >= 0.05 (5x of v10's 0.87%) -> thesis high point
@@ -86,7 +92,7 @@ python train.py \
   --ckpt_path=weights/eloftr_outdoor.ckpt \
   --gpus=4 \
   --num_nodes=1 \
-  --batch_size=4 \
+  --batch_size=2 \
   --num_workers=12 \
   --pin_memory=true \
   --check_val_every_n_epoch=1 \
