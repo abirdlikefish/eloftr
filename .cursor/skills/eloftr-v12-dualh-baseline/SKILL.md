@@ -232,7 +232,21 @@ ep5 三个 val P@K 与 v10 ep11 对照：
 
 ## 7. METU-OOD 独立 eval（关键 ablation 数字，2026-05-12）
 
-eval 协议：`configs/data/metu_vistir_test_all.py` + 2590 pair + thermal as side0 + vis as side1 + undistort=True + RANSAC thr=2.0 times=5 + loftr_thr=0.1 + epi_err_thr=5e-4。
+> **⚠️ 协议过时警告（2026-05-13 加注）**：本节所有 METU AUC 数字（v12 ep5 `0.001401 / 0.006642 / 0.039631`，baseline outdoor.ckpt `0.002526 / 0.009872 / 0.043206`）都基于**旧协议**：
+> - `RANSAC thr=2.0 times=5` (5-restart 取 best)
+> - `loftr_thr=0.1`
+> - `T_0to1 = inv(P1) @ P0`（错的 C2W 公式，应为 W2C `P1 @ inv(P0)`）
+> - `cv2.undistort(img, K, d)` 等于 `newCameraMatrix=K0`（不是 `getOptimalNewCameraMatrix(alpha=0)` 出来的 new_K）
+> - pad_to_square=True
+> - AUC 聚合 = pool 2590 pair 一次 `aggregate_metrics`（不是 per-class 平均）
+>
+> 在新协议下（ransac_thr=1.5 / times=1 / megasize=640 / loftr_thr=0.2 / W2C T_0to1 / getOptimalNewCameraMatrix / pad False / per-class 平均），ELoFTR outdoor.ckpt baseline 跑出 `auc@5/10/20 = 2.962 / 8.093 / 18.125` (百分数)，**bit-perfect 复现 MINIMA 论文 Table 3 (2.88 / 7.88 / 17.72)**。
+>
+> §7 后续诊断结论（prec UP / AUC DOWN signature、modality shift、geometry shift、val identity matching saturation 等）**仍然成立**——绝对数字单位变了但 v12 vs baseline 的差距方向、定性诊断都不受协议变更影响。具体 v12 在新协议下的 METU 数字**待 backfill**（要重跑一次 [MyScripts/eval_metu_vistir_finetuned.bat 12](../../../MyScripts/eval_metu_vistir_finetuned.bat)）。
+>
+> 协议变更全细节 → [eloftr-metu-vistir-eval](../eloftr-metu-vistir-eval/SKILL.md) §5。
+
+eval 协议（**旧**，已不再使用）：`configs/data/metu_vistir_test_all.py` + 2590 pair + thermal as side0 + vis as side1 + undistort=True + RANSAC thr=2.0 times=5 + loftr_thr=0.1 + epi_err_thr=5e-4。
 
 ### 7.1 数字对照（v12 ep5 vs baseline outdoor.ckpt）
 
@@ -326,7 +340,8 @@ v12 negative ablation 给出**正面 thesis 答辩证据**：
 | **父对照** | [eloftr-v11-dualh](../eloftr-v11-dualh/SKILL.md) | v12 是 v11 的反向 ablation；同一份 dual H aug 改动 |
 | 数据集 | [eloftr-megadepth-syn-data](../eloftr-megadepth-syn-data/SKILL.md) | 训练数据 SOP；val identity matching 警告 |
 | DDP runtime | [eloftr-server-multigpu](../eloftr-server-multigpu/SKILL.md) | image-level pre-shard / sync_bn / wall-clock 17h |
-| 评估指标 | [eloftr-eval-pipeline](../eloftr-eval-pipeline/SKILL.md) | prec / AUC 定义、RANSAC 协议、METU eval bat |
+| 评估指标 (M3FD/RoadScene prec@N px) | [eloftr-eval-pipeline](../eloftr-eval-pipeline/SKILL.md) | precision@1/3/5 px 定义、ckpt cfg 自动配对 |
+| 评估指标 (METU pose-AUC@N°) | [eloftr-metu-vistir-eval](../eloftr-metu-vistir-eval/SKILL.md) | MINIMA 协议、T_0to1 W2C 公式、bit-perfect 复现、v12 旧协议数字过时说明 |
 | 链总览 | [eloftr-cross-modal-experiments](../eloftr-cross-modal-experiments/SKILL.md) | 跨版本继承图（v12 是 ablation 反例，不进主链）|
 | 数字归档 | [eloftr-results](../eloftr-results/SKILL.md) → [`results/eval_summary.md`](../../../results/eval_summary.md) | v12 METU 数字待 backfill |
 | 训练侧 KPI | [eloftr-tb-summary](../eloftr-tb-summary/SKILL.md) → [`results/tb_summary.md`](../../../results/tb_summary.md) | v12 wall-clock / total_steps / best val 待 backfill |

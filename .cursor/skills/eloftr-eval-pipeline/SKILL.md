@@ -7,6 +7,10 @@ description: Evaluate EfficientLoFTR checkpoints (official or finetuned v1..v7, 
 
 > 该 skill 假定数据集已经按 [eloftr-roadscene-data](../eloftr-roadscene-data/SKILL.md) 集成、模型按 [eloftr-cross-modal-experiments](../eloftr-cross-modal-experiments/SKILL.md) 训练完成。
 >
+> **本 skill 覆盖范围**：RoadScene / M3FD 的 **precision@N px** pipeline（per-match epipolar 误差判定）。
+>
+> **METU-VisTIR (pose-AUC@5/10/20°) 走完全不同的协议**——跑法、字段、聚合、踩坑全在 [eloftr-metu-vistir-eval](../eloftr-metu-vistir-eval/SKILL.md)，本 skill 不重复。判断走哪条：用的 dataset 是 `RoadScene` 或 `M3FD` 走本 skill；是 `METU_VISTIR` 走那条。
+>
 > **跑出 overall.txt 之后**：把数字追加到 `results/eval_summary.md`，工作流见 [eloftr-results](../eloftr-results/SKILL.md)。本 skill 只管"产生 overall.txt"，**不管"跨版本横向对照"**——后者唯一来源是 [`results/eval_summary.md`](../../../results/eval_summary.md)。
 >
 > 同一份 [MyScripts/eval_roadscene.py](../../../MyScripts/eval_roadscene.py) 既能跑 RoadScene test，也能跑 M3FD test（只是名字保留了历史叫法）。两个 bat wrapper 区分评估集：
@@ -14,6 +18,11 @@ description: Evaluate EfficientLoFTR checkpoints (official or finetuned v1..v7, 
 > - [MyScripts/eval_m3fd_finetuned.bat](../../../MyScripts/eval_m3fd_finetuned.bat) → 评估 M3FD test
 >
 > 两个 wrapper CLI 完全对称，因此 v1..v4（roadscene 训练）和 v5+（M3FD 训练）都可以做 in-domain 与 OOD 双向比较。
+>
+> METU 路径独立（不复用 `eval_roadscene.py`）：
+> - [MyScripts/eval_metu_vistir_official.bat](../../../MyScripts/eval_metu_vistir_official.bat) → ELoFTR outdoor.ckpt baseline
+> - [MyScripts/eval_metu_vistir_finetuned.bat](../../../MyScripts/eval_metu_vistir_finetuned.bat) → v10/v11/v12 finetuned ckpt
+> - [MyScripts/visualize_metu_vistir.py](../../../MyScripts/visualize_metu_vistir.py) → 两个 bat 共用的 python 入口
 
 ## 0. 为什么必须有专门的 eval skill
 

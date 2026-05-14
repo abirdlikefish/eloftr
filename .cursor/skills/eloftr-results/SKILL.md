@@ -45,6 +45,8 @@ description: Single source-of-truth index for EfficientLoFTR cross-modal experim
 
 ## 3. 表的数据规范（追加新行时务必遵守）
 
+### 3.1 RoadScene / M3FD prec@N px overall.txt 字段（§1 §2 §3）
+
 每个 overall.txt 共写 8 个字段，全部如实抄入：
 
 ```text
@@ -68,12 +70,35 @@ precision@5px:      -> P@5px 列（保留 4 位小数）
 
 **列宽对齐**：保持 §1 / §2 的列顺序与现有表一致（main_cfg / ckpt / total_matches / matches/pair / mpe / P@1 / P@3 / P@5）；§3 列顺序固定（M3FD P@1 / M3FD P@3 / M3FD mpe / OOD P@1 / OOD P@3 / OOD mpe / 综合 / 排名 / Δ）。
 
+### 3.2 METU-VisTIR pose-AUC overall.txt 字段（§6，2026-05-13 新增）
+
+**METU 跟 RoadScene/M3FD 是不同的评测指标**——RoadScene/M3FD 是 epipolar prec@1/3/5px，METU 是 pose-based AUC@5/10/20°。**两个不同表，不要混着填**。完整 METU 协议见 [eloftr-metu-vistir-eval](../eloftr-metu-vistir-eval/SKILL.md)。
+
+METU overall.txt 三段块，应抄入字段：
+
+```text
+[overall]
+all_class_mean  auc@5: 2.962   auc@10: 8.093   auc@20: 18.125
+num_matches: 253.84
+
+→ §6 表填这 4 列（auc@5 / auc@10 / auc@20 / num_matches），单位百分数 (overall.txt 已 ×100)
+```
+
+per-class 两行 (`cloudy_cloudy` / `cloudy_sunny`) 是 diagnostic，不入 §6 主表；若需细分到光照条件，加 §6.1 附表。per-scene 10 行更细，不入汇总。
+
+**派生列**：
+- `Δ vs baseline` = 该 ckpt auc@10 - ELoFTR outdoor.ckpt baseline auc@10（cross-modal 训练增益）
+- 排名按 `auc@10` 降序（或 `auc@5 + auc@10 + auc@20` 加和，跟 §3 综合通用性同思路）
+
+**协议变更注意**（2026-05-13）：旧的 METU 行（如果有）基于「ransac_thr=2.0 / 5-restart / pool aggregation / T_0to1=inv(P1)@P0」旧协议，**跟新协议的 ELoFTR baseline 不可直接比较**，详见 [eloftr-metu-vistir-eval §5](../eloftr-metu-vistir-eval/SKILL.md)。追加新行时确认是新协议跑出来的 (overall.txt 顶部 `protocol: MINIMA / XoFTR` 标记)。
+
 ## 4. 与其它 skill 的关系（边界）
 
 | skill | 它管什么 | 不管什么 |
 |---|---|---|
-| **本 skill (eloftr-results)** | 「跨版本独立 eval 数字的汇总在哪、怎么追加新行、怎么解释 v9⭐ / v8⚠️ 这种标记」 | 数字怎么来的（→ eval-pipeline）、模型为什么这样设计（→ v_x）、训练曲线（→ tb-analysis） |
-| [eloftr-eval-pipeline](../eloftr-eval-pipeline/SKILL.md) | 「`eval_roadscene.py` / `eval_*finetuned.bat` 怎么跑、ckpt cfg 怎么自动配对、新旧目录命名映射、`unexpected_keys` 调试」 | 跨版本数字对照表（→ 本 skill） |
+| **本 skill (eloftr-results)** | 「跨版本独立 eval 数字的汇总在哪、怎么追加新行、怎么解释 v9⭐ / v8⚠️ 这种标记」 | 数字怎么来的（→ eval-pipeline / metu-vistir-eval）、模型为什么这样设计（→ v_x）、训练曲线（→ tb-analysis） |
+| [eloftr-eval-pipeline](../eloftr-eval-pipeline/SKILL.md) | 「`eval_roadscene.py` / `eval_*finetuned.bat` 怎么跑、ckpt cfg 怎么自动配对、新旧目录命名映射、`unexpected_keys` 调试」 — RoadScene / M3FD precision@N px 路径 | 跨版本数字对照表（→ 本 skill）；METU pose-AUC（→ metu-vistir-eval） |
+| [eloftr-metu-vistir-eval](../eloftr-metu-vistir-eval/SKILL.md) | METU-VisTIR pose-AUC eval：MINIMA 协议精确参数、bit-perfect 复现论文表 3、T_0to1 公式、side 不对称、故障树 | 跨版本数字对照表（→ 本 skill）；RoadScene / M3FD（→ eval-pipeline） |
 | [eloftr-tb-analysis](../eloftr-tb-analysis/SKILL.md) | 「训练 tfevents 抽 per-epoch JSON、v9_acceptance 自动评级、MSBN 是否 active」 | **训练 val ≠ 独立 eval**，本 skill 表里的所有数字都来自独立 eval 不来自 tb |
 | [eloftr-v5-m3fd](../eloftr-v5-m3fd/SKILL.md) ... [eloftr-v9-e2e](../eloftr-v9-e2e/SKILL.md) | 单版本设计动机、配置、训练 schedule、ablation 想法 | 跨版本横向对比（→ 本 skill） |
 | [eloftr-cross-modal-experiments](../eloftr-cross-modal-experiments/SKILL.md) | 链路总览、继承图、候选路径 A-G、加新版本 playbook | 当前 SOTA 数字（→ 本 skill） |
@@ -81,8 +106,9 @@ precision@5px:      -> P@5px 列（保留 4 位小数）
 ## 5. 历史与未来扩展
 
 - **v1..v4 暂不纳入本 skill 表**：那四个是 RoadScene-trained，独立 eval 在 `dump/roadscene_eval_v{1..4}_*/`，"in-domain"对它们而言是 RoadScene 而非 M3FD，跟 v5+ 不可同表对比。如果以后做 v1..v4 的"跨数据集 eval 矩阵"（在 M3FD 上测 RoadScene-trained ckpt），新建 `results/eval_v1_v4_cross_dataset.md`，本 skill 不管。
+- **METU-VisTIR (2026-05-13 加入)**：作为 §6 新表，**协议跟 RoadScene/M3FD 完全不同**（pose-AUC@5/10/20° vs prec@N px）。dataset 协议 + 跑法 + 故障树详见 [eloftr-metu-vistir-eval](../eloftr-metu-vistir-eval/SKILL.md)。**§3 综合通用性公式不扩到 METU**（混入不同指标会破坏 single-number ranking），METU 单独看 `auc@10` 排序。
 - **未来超 15 行后**：本 skill §0 "数据来源索引" 表会变长，那时可以补一个 `MyScripts/aggregate_eval_results.py` 自动扫 `dump/*/overall.txt` 出 CSV，避免手抄漏字段。当前 6 行规模写脚本 ROI 不高，**先手维护**。
-- **未来加 LLVIP / KAIST / TNO**：在 `results/eval_summary.md` §1 / §2 各加一张表（每张表对应一个数据集）；本 skill 工作流不变，只是 §3 综合通用性公式可能要扩成 "M3FD P@3 + OOD-RoadScene P@3 + OOD-LLVIP P@3 + OOD-TNO P@3"。届时回头改本 skill §3 公式即可。
+- **未来加 LLVIP / KAIST / TNO**：根据数据集是 epipolar prec 还是 pose-AUC，加到 §1 / §2 一族 或 §6 一族。本 skill 工作流不变。
 
 ## 6. AGENTS.md / 路径规则关系
 

@@ -1,46 +1,58 @@
 @echo off
 REM ============================================================
 REM  eval_metu_vistir_finetuned.bat
-REM  Sister of MyScripts\eval_m3fd_finetuned.bat: same X / Y / Z
-REM  semantics, but evaluates v10/v11 (or future msyn-trained)
-REM  ckpts on METU_VISTIR (real-captured drone VIS+LWIR pairs)
-REM  using the project-native test.py pose-based pipeline:
+REM  Sister of eval_metu_vistir_official.bat. Evaluates v10/v11/v12+
+REM  (msyn-trained) ckpts on METU_VISTIR (real-captured drone VIS+LWIR
+REM  pairs) under the same protocol as the ELoFTR baseline run by
+REM  eval_metu_vistir_official.bat, so finetuned numbers and the
+REM  outdoor.ckpt baseline (paper Table 3 ELoFTR row 2.88 / 7.88 / 17.72)
+REM  are directly comparable.
 REM
-REM    test.py -> trainer.test -> PL_LoFTR.test_step
-REM      -> compute_symmetrical_epipolar_errors
-REM      -> compute_pose_errors (RANSAC / LO-RANSAC)
-REM      -> aggregate_metrics  ->  auc@5/10/20 + prec@5e-4
+REM  Protocol: MINIMA / XoFTR test_relative_pose_infrared.py (CVPR 2025)
+REM    - ransac_thr=1.5, ransac_times=1 (single estimate_pose call)
+REM    - long edge = 640 (paper Sec 5.1: "long dimension equal to 640")
+REM    - LOFTR.MATCH_COARSE.THR = 0.2 (MINIMA load_loftr default;
+REM      eloftr_full.py cfg: "recommend 0.2 for full model")
+REM    - NPE off (test long edge 640 < train 832; no extrapolation needed)
+REM    - side0=thermal / side1=vis (cfg default for v10+ -- modemb_ir
+REM      bound to image0 needs thermal in image0; NOT overridden here).
+REM      Mirror cross-version comparison caveat: ELoFTR baseline
+REM      (official.bat) overrides to side0=vis to match MINIMA; the two
+REM      protocols therefore differ in image0 modality. See
+REM      align-metu-eval-minima_*.plan.md for the asymmetry rationale.
+REM    - undistort via cv2.getOptimalNewCameraMatrix alpha=0 -> new_K
+REM      (dataset side, src/datasets/metu_vistir.py)
+REM    - pad_to_square=False (dataset default; bs=1 forward at native shape)
+REM    - AUC: per-npz error_auc -> split('_scene')[0] class mean ->
+REM      2-class mean (all_class_mean compares with paper Table 3)
 REM
-REM  Three-subset reporting (one cfg per subset, run sequentially):
-REM    all              : 10 npz / 2590 pair  (full set)
-REM    cloudy_cloudy    :  6 npz / 1382 pair  (same illumination)
-REM    cloudy_sunny     :  4 npz / 1208 pair  (cross illumination,
-REM                                            hardest robustness slice)
+REM  History: prior protocol used ransac_thr=2.0 / 5-restart / cfg default
+REM  megasize=832 and pooled all 2590 pair errors into a single AUC
+REM  (project-native test.py path). That protocol drastically
+REM  under-reports METU AUC and is incompatible with paper baseline.
+REM  results/eval_summary.md sec 6 v0..v12 METU rows produced under the
+REM  old protocol are NO LONGER directly comparable to new runs and need
+REM  a full rerun once this script is committed.
 REM
 REM  Usage:
 REM    eval_metu_vistir_finetuned.bat X [Y] [Z]
 REM
 REM  Inputs (all support -1 as "use default"):
-REM    X : version number (10, 11, ...).
-REM          -> resolves to logs\tb_logs\msyn_vX_* (so X=10 picks
-REM             msyn_v10_ddp / msyn_v10_singlecard, X=11 picks
-REM             msyn_v11_dualh_aggressive_ddp, etc.)
-REM          -> auto-skips _debug / _small experiments
-REM          -> auto-skips sub-version siblings (X=10 will not pick v10_1)
-REM          -> required (no real default; -1 is treated as missing)
-REM    Y : lightning version_Y under that experiment (optional)
-REM          -> default = highest-numbered version_N
-REM    Z : ckpt rank by RANK_KEY=precision@3px (optional)
-REM          1..5 = pick the 1st..5th best ckpt
-REM          6    = pick last.ckpt
-REM          -> default = 1 (best p@3px)
+REM    X : version number (10, 11, 12, ...). Resolves to
+REM        logs\tb_logs\msyn_vX_* (auto-skips _debug / _small / sub-version
+REM        siblings X=10 will not pick v10_1). Required.
+REM    Y : lightning version_Y under that experiment (optional; default
+REM        = numeric max).
+REM    Z : ckpt rank by RANK_KEY=precision@3px (optional; default = 1).
+REM        1..5 = pick the 1st..5th best ckpt; 6 = last.ckpt.
 REM
-REM  cfg picked: configs\loftr\eloftr_full_vX*msyn*.py
-REM              (precise glob to msyn-series cfg only; baseline
-REM               eloftr_full.py and m3fd-only configs ignored)
+REM  cfg picked: configs\loftr\eloftr_full_vX*msyn*.py (glob to msyn
+REM              series only; baseline eloftr_full.py and m3fd configs
+REM              are excluded).
 REM
-REM  Output dirs: dump\metu_eval_v<X>_version<Y>_<topZ|last>\{all,
-REM               cloudy_cloudy,cloudy_sunny}\overall.txt
+REM  Output: dump\metu_eval_v<X>_version<Y>_<topZ|last>\all\overall.txt
+REM          (per-class breakdown appears inside the same overall.txt;
+REM          single full-set run, no need for 3-subset loop).
 REM
 REM  Examples:
 REM    eval_metu_vistir_finetuned.bat 10           -> v10 best p@3px
@@ -252,42 +264,50 @@ if not exist "!OUT_DIR!" mkdir "!OUT_DIR!"
 
 echo.
 echo ============================================================
-echo   Eval set   : METU_VISTIR  (3 subsets)
+echo   Eval set   : METU_VISTIR  (msyn-trained ckpt)
 echo   Experiment : !EXP!
 echo   Version    : version_!Y!
 echo   Z (rank)   : !Z!  (!Z_TAG!,  RANK_KEY=!RANK_KEY!)
 echo   Ckpt       : !FT_CKPT!
 echo   Cfg (LoFTR): !FT_CFG!
 echo   Out dir    : !OUT_DIR!
+echo   Protocol   : MINIMA / XoFTR (CVPR 2025)
+echo                ransac_thr=1.5  times=1  thr=0.2  megasize=640  npe=off
+echo                side0=thermal  side1=vis  pad_to_square=False
+echo                (sister of eval_metu_vistir_official.bat; same protocol
+echo                 except side0/1 = thermal/vis vs vis/thermal -- see header)
 echo ============================================================
 echo.
 
-REM ---- run all 3 subsets sequentially -------------------------------------
-REM Each call drives MyScripts/visualize_metu_vistir.py:
-REM   - progress prints DIRECTLY to this cmd window (no `> file` redirect),
-REM     so you see one line per pair in real time
-REM   - figures saved to <SUB_OUT>\figures\ (capped at --max_figs)
-REM   - overall.txt + summary.csv written by the python script itself
-REM
-REM RANSAC protocol aligned with eval_metu_vistir_official.bat (MINIMA /
-REM XoFTR test_relative_pose_infrared.py): ransac_thr=1.5, single shot.
-REM Note: results/eval_summary.md §6 v0..v12 METU rows were computed under
-REM the older ransac_thr=2.0 / 5-restart protocol; those numbers are NO
-REM LONGER directly comparable to fresh runs after this protocol switch
-REM and need a rerun for cross-version comparison with the new ELoFTR
-REM baseline (eval_metu_vistir_official.bat).
-set "RANSAC_FLAG=--ransac RANSAC --ransac_thr 1.5 --ransac_times 1"
+REM Each call drives MyScripts/visualize_metu_vistir.py: progress prints to
+REM this cmd window in real time; figures saved to <SUB_OUT>\figures\;
+REM overall.txt + summary.csv written by the python script.
 
-REM Cap on saved figures per subset (set 0 to disable figures entirely).
+REM RANSAC: MINIMA / XoFTR protocol = thr 1.5, single shot.
+set "RANSAC_FLAG=--ransac RANSAC --ransac_thr 1.5 --ransac_times 1"
 set "MAX_FIGS=10"
 
+REM FT_PROTOCOL (MINIMA / XoFTR test_relative_pose_infrared.py):
+REM   --thr 0.2         MATCH_COARSE.THR matches MINIMA load_loftr default
+REM                     + eloftr_full.py cfg ("recommend 0.2 for full model").
+REM                     NOTE: train-side ModelCheckpoint monitor uses THR=0.1
+REM                     to pick best.ckpt by prec@1/3/5px; eval-side THR=0.2
+REM                     is the MINIMA-aligned cross-version-comparable setting.
+REM   --megasize 640    paper Sec 5.1 "long dimension equal to 640"
+REM                     (no --npe: test long edge 640 < train 832, no need).
+REM   side0 / side1     NOT overridden here. cfg default (METU_SIDE0=thermal,
+REM                     METU_SIDE1=vis) is the v10+ training-time convention
+REM                     (modemb_ir is bound to image0). The ELoFTR baseline
+REM                     bat overrides to side0=vis because outdoor.ckpt has
+REM                     no modemb and MINIMA's reference image_paths[id0][0]
+REM                     is visible. Mind this asymmetry when comparing.
+set "FT_PROTOCOL=--thr 0.2 --megasize 640"
+
 REM ====================================================================
-REM  SUBSETS: under the new MINIMA protocol visualize_metu_vistir.py
-REM  already groups per-npz AUC into cloudy_cloudy / cloudy_sunny /
-REM  all_class_mean inside a single full-set run, so SUBSETS=all is
-REM  enough (per-class breakdown appears in overall.txt). The 3-subset
-REM  loop is kept as a smoke convenience but produces redundant per-class
-REM  rows.
+REM  SUBSETS: under MINIMA protocol the visualize_metu_vistir.py python
+REM  end already groups per-npz AUC into cloudy_cloudy / cloudy_sunny /
+REM  all_class_mean in a single full-set run. The 3 subsets are now
+REM  redundant; keep SUBSETS=all by default.
 REM ====================================================================
 set "SUBSETS=all"
 
@@ -299,13 +319,6 @@ REM     50  : 每 50 对取 1 对 (~52 pair, 极速 sanity check)
 REM  注: STRIDE > 1 时 auc@5/10/20 数字仅供方向性预览, 跨版本对比仍需 STRIDE=1
 REM ====================================================================
 set "STRIDE=1"
-
-REM ====================================================================
-REM  THR=0.2 警告: 训练侧 ModelCheckpoint monitor 用 THR=0.1 算 prec@1/3/5px
-REM  挑 best.ckpt; eval 端用 THR=0.2 后, 此处的 auc/prec 数字将和 ckpt
-REM  选择口径脱钩, 也无法直接对比 results/eval_summary.md §6 中按 THR=0.1
-REM  跑出的历史数字。如果想严格做跨版本对比, 改回 --thr 0.1。
-REM ====================================================================
 
 for %%S in (%SUBSETS%) do (
     set "SUB=%%S"
@@ -327,8 +340,7 @@ for %%S in (%SUBSETS%) do (
       --out_dir "!SUB_OUT!" ^
       !RANSAC_FLAG! ^
       --max_figs !MAX_FIGS! ^
-      --thr 0.2 ^
-      --megasize 640 ^
+      !FT_PROTOCOL! ^
       --stride !STRIDE! ^
       --num_workers 8
 
@@ -341,7 +353,7 @@ for %%S in (%SUBSETS%) do (
 
 echo.
 echo ============================================================
-echo  All METU subsets finished. Summary:
+echo  All METU subsets finished (finetuned ckpt). Summary:
 for %%S in (%SUBSETS%) do (
     echo   !OUT_DIR!\%%S\overall.txt
 )
