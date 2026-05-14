@@ -2,11 +2,12 @@
 
 v15 vs v14 是 1 项改动 ablation:
 - 训练 fingerprint 仅由 cfg.LOFTR.LOSS.USE_CONTRASTIVE 区分
-- 其他全部继承 v14 (8 项 cfg + 7 项 sh):
-  IMG_RESIZE=640, NPE [832,832,640,640], bs=4, CANONICAL_LR 5e-4,
-  WARMUP 450, MSLR [6,10,14], ES patience 5, N_SAMPLES=100, max_ep=18,
-  EVAL_TIMES=1, limit_val_batches=0.2, ENABLE_PLOTTING=False,
-  log_every_n_steps=500.
+- 其他全部继承 v14 (7 项 cfg + 7 项 sh):
+  IMG_RESIZE=640 (NPE 走 train.py fallback [832,832,832,832], 跟 v0-v13 一致;
+  v14 初版 NPE bug 已修复, 见 eloftr_full_v14_pose_msyn_ddp.py "NPE bug
+  post-mortem"), bs=4, CANONICAL_LR 5e-4, WARMUP 450, MSLR [6,10,14],
+  ES patience 5, N_SAMPLES=100, max_ep=18, EVAL_TIMES=1,
+  limit_val_batches=0.2, ENABLE_PLOTTING=False, log_every_n_steps=500.
 
 v1 contrastive loss 简介 (见 .cursor/skills/eloftr-v1-contrast/SKILL.md):
 - transformer 出口对 IR/VIS coarse tokens 做 symmetric InfoNCE

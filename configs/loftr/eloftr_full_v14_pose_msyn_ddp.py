@@ -1,11 +1,37 @@
-"""v14 = v13 + IMG_RESIZE 640 + NPE [832,832,640,640] + bs=4 (LR/WARMUP 反向缩放保
-TRUE_LR=1.25e-4 不变) + EVAL_TIMES=1 (val 加速) + N_SAMPLES_PER_SUBSET 200->100
-(LoFTR paper default) + 配套 schedule 等比例放大 (max_ep 12->18, MSLR x2,
-ES x~1.7) + ENABLE_PLOTTING=False (TB 文件 1.1GB->220MB).
+"""v14 = v13 + IMG_RESIZE 832->640 + bs=4 (LR/WARMUP 反向缩放保 TRUE_LR=1.25e-4
+不变) + EVAL_TIMES=1 (val 加速) + N_SAMPLES_PER_SUBSET 200->100 (LoFTR paper
+default) + 配套 schedule 等比例放大 (max_ep 12->18, MSLR x2, ES x~1.7) +
+ENABLE_PLOTTING=False (TB 文件 1.1GB->220MB).
 
-v14 vs v13 ablation 矩阵 (13 项改动 / 6 组逻辑):
+==============================================================================
+ NPE bug post-mortem (v14 初版踩坑 2026-05-14, 已修复, 留作经验)
+==============================================================================
+初版我加了 cfg.LOFTR.COARSE.NPE = [832, 832, 640, 640], 想"让 RoPE 跨分辨率
+自动校准". 实测 v14 ep0 auc@10=0.214 / ep1 0.229, 比 v13 ep0=0.376 低 43%,
+**甚至比 outdoor.ckpt cold start baseline (估 ~0.30-0.35) 还差**.
+
+根因: position_encoding.py:22 用 `i_position * train_res_H / test_res_H` stretch
+RoPE buffer 的 position 序列. NPE=[832,832,640,640] -> ratio=1.3 ->
+position 从 (1, 2, ..., 26) 改成 (1.3, 2.6, ..., 26). 但 outdoor.ckpt 的
+attention weights 是基于 integer position 学的, phase 错位 50% (cos(1.3)
+vs cos(1) = 0.27 vs 0.54), 低频维度 attention pattern 被全局破坏.
+
+设计意图: LoFTR opt_config.py:33 注释 "Suggest setting based on the long
+side, *especially when long_side > 832*" -- NPE stretch 是给 *extrapolation*
+(input > train, e.g. LoFTR paper MegaDepth1500 1152 input vs 832 train) 用的;
+v14 long_side 640 < 832 是 *interpolation*, integer position (1..20) 已经
+是 ckpt 学过 (1..26) 的子集, attention 兼容良好, **不该 stretch**.
+
+历史: v0-v13 全部不显式设 NPE, 走 train.py:129-130 fallback [832,832,832,832]
+(ratio=1.0, 不 stretch); v14 该跟它们一致.
+
+修复: 删除 `cfg.LOFTR.COARSE.NPE = [832, 832, 640, 640]` 这一行, 让 train.py
+fallback 兜底 [832, 832, 832, 832]. 修复后预期 v14 ep0 auc@10 ~ 0.33-0.40
+(跟 v13 ep0 0.376 同量级, 因为只少了 sample-pass 而 attention 没被破坏).
+==============================================================================
+
+v14 vs v13 ablation 矩阵 (12 项改动 / 5 组逻辑动机, 已删除 NPE bug 那项):
 - 训练核心 ablation 变量 (1 项): MGDPT_IMG_RESIZE 832->640 (in data cfg, not here)
-- NPE 配套校准 (1 项): cfg.LOFTR.COARSE.NPE = [832, 832, 640, 640]
 - bs + LR/WARMUP 反向缩放 (3 项): bs 2->4, CANONICAL_LR 1e-3->5e-4,
   WARMUP_STEP 225->450 (TRUE_LR / actual WARMUP step 跟 v13 完全一致)
 - val 加速 (2 项): EVAL_TIMES 5->1, --limit_val_batches 0.5->0.2 (val 协议跟
@@ -43,8 +69,8 @@ v14 schedule 推算 (sample-pass 等效 v13 ES 早停后实际值):
   max_ep 18 给 ES 留余地
 
 理论预期 (METU all auc@20):
-  消除 832->640 train/eval mismatch (NPE 频率自动校准 + AGG attention spatial
-  pattern + fine_window 物理覆盖率): +5~15% relative
+  消除 832->640 train/eval mismatch (AGG attention spatial pattern +
+  fine_window 物理覆盖率): +5~15% relative
   640 训练分辨率本身比 832 弱: -5% relative
   N=100 sample-pass 略减: -2% relative
   净 -2 ~ +8% relative auc@20 (大概率持平或微升)
@@ -73,19 +99,16 @@ Acceptance gate (v14 vs v13 实测 best by auc@10 monitor):
            METU all auc@20 >= v13 数字 + 0.5pp
   Medium : val auc@10 in [0.405, 0.415)
   Weak   : val auc@10 < 0.405
-  Crash  : NaN loss or METU auc < outdoor.ckpt -> NPE 设错 / cfg merge
-           顺序错; 查 train.py:129-130
+  Crash  : NaN loss or v14 ep0 auc@10 远 < outdoor.ckpt baseline
+           (~0.30-0.35 估算) -> 再次检查是否有人误加 NPE override
 """
 from configs.loftr.eloftr_full_v13_pose_msyn_ddp import cfg
 
-# === v14 唯一架构性改动: NPE 显式设跨分辨率校准 ===
-# v13 走 train.py:130 fallback [832,832,832,832], 当前数据是 832 也对; v14 当前
-# 数据是 640, 必须显式设, 否则 RoPE 频率没按比例校准 = 等于 v0-v12 那种潜在 bug
-# 状态. position_encoding.py:21-22 用 train_res / test_res 比例 stretch RoPE
-# frequency, 让 outdoor.ckpt (832 训) 在 640 input 上看到的位置距离尺度跟训练
-# 时一致. 第一对 [832, 832] = outdoor.ckpt 训练分辨率 (不变); 第二对 [640, 640]
-# = v14 当前数据长边.
-cfg.LOFTR.COARSE.NPE = [832, 832, 640, 640]
+# === NPE 注意 ===
+# 这里**不**显式设 cfg.LOFTR.COARSE.NPE (跟 v0-v13 一致).
+# train.py:129-130 会兜底 fallback 到 [832, 832, 832, 832] (ratio=1.0, 不 stretch).
+# 当 long_side <= 832 (v14 是 640) 时, integer position 是 outdoor.ckpt 学过的
+# 子集, attention 兼容良好. 见 docstring 顶部 "NPE bug post-mortem".
 
 # === bs=4 显存安全 (sim_matrix 0.66GB 比 v13 bs=2 的 0.93GB 还小) ===
 # 反向缩放 LR/WARMUP 保 TRUE_LR + actual WARMUP step 跟 v13 / v10 / v9 完全

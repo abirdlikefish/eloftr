@@ -1,10 +1,15 @@
 #!/bin/bash
 # ============================================================================
 # run_msyn_v14_pose_ddp.sh
-# v14 entry: v13 + IMG_RESIZE 832->640 + NPE [832,832,640,640] + bs=4 +
+# v14 entry: v13 + IMG_RESIZE 832->640 + bs=4 +
 # val 加速 (EVAL_TIMES=1 / limit_val_batches=0.2) + N_SAMPLES 200->100 +
 # schedule 等比例放大 (max_ep 12->18, MSLR [3,5,7]->[6,10,14], ES 3->5) +
 # TB 精简 (ENABLE_PLOTTING=False / log_every_n_steps 50->500).
+#
+# NOTE: v14 cfg 不显式设 cfg.LOFTR.COARSE.NPE (跟 v0-v13 一致, 走 train.py:130
+# fallback [832,832,832,832]). v14 初版误设 NPE=[832,832,640,640] 让 RoPE
+# position stretch 1.3x, attention pattern 被破坏, ep0 起步 0.214 < outdoor.ckpt
+# baseline (~0.30+). 修复见 cfg docstring "NPE bug post-mortem".
 #
 # v14 vs v13 是 13 项改动 / 6 组逻辑动机的 ablation, 见
 # configs/loftr/eloftr_full_v14_pose_msyn_ddp.py docstring.
@@ -69,8 +74,8 @@
 #   Strong : METU auc@20 >= v13 数字 + 0.5pp -> 论文写"分辨率 ablation 成功"
 #   Medium : METU auc@20 in [v13 - 0.5pp, v13 + 0.5pp] -> 832/640 都行
 #   Weak   : METU auc@20 < v13 - 1.0pp -> 回退用 v13 832 path
-#   Crash  : NaN loss / METU auc 远 < outdoor.ckpt -> NPE 设错 / cfg merge
-#            顺序错; 查 train.py:129-130
+#   Crash  : NaN loss / v14 ep0 auc@10 < outdoor.ckpt baseline (~0.30-0.35)
+#            -> 再次检查 cfg 是否误加 NPE override (v14 初版 NPE bug 已修复)
 # ============================================================================
 set -euo pipefail
 
