@@ -309,7 +309,7 @@ precision@5px: 0.7384
 
 # v13 msyn 832
 
-[per-scene] (units: %)
+<!-- [per-scene] (units: %)
   cloudy_cloudy_scene_1               auc@5: 22.356  auc@10: 44.953  auc@20: 63.972  pairs: 131
   cloudy_cloudy_scene_2               auc@5: 16.500  auc@10: 33.762  auc@20: 53.965  pairs: 197
   cloudy_cloudy_scene_3               auc@5: 17.565  auc@10: 34.524  auc@20: 52.588  pairs: 266
@@ -327,19 +327,27 @@ precision@5px: 0.7384
 ---
 [overall] (units: %)
   all_class_mean                      auc@5: 14.539  auc@10: 30.937  auc@20: 50.216   # compare with MINIMA paper Table 3 ELoFTR: 2.88 / 7.88 / 17.72
-num_matches: 467.78
+num_matches: 467.78 -->
 
+  cloudy_cloudy                       auc@5: 19.326  auc@10: 37.665  auc@20: 56.197
+  cloudy_sunny                        auc@5: 11.872  auc@10: 27.257  auc@20: 46.379
+---
+[overall] (units: %)
+  all_class_mean                      auc@5: 15.599  auc@10: 32.461  auc@20: 51.288  
 
 roadscene
-
+<!-- 
 precision@1px: 0.0774
 precision@3px: 0.4482
-precision@5px: 0.7291
+precision@5px: 0.7291 -->
 
+precision@1px: 0.0792
+precision@3px: 0.4564
+precision@5px: 0.7341
 
 # v14 msyn 640
 
-[per-scene] (units: %)
+<!-- [per-scene] (units: %)
   cloudy_cloudy_scene_1               auc@5: 28.283  auc@10: 47.900  auc@20: 63.919  pairs: 131
   cloudy_cloudy_scene_2               auc@5: 16.955  auc@10: 34.029  auc@20: 53.919  pairs: 197
   cloudy_cloudy_scene_3               auc@5: 23.681  auc@10: 40.696  auc@20: 56.130  pairs: 266
@@ -357,19 +365,39 @@ precision@5px: 0.7291
 ---
 [overall] (units: %)
   all_class_mean                      auc@5: 15.922  auc@10: 32.764  auc@20: 51.103   # compare with MINIMA paper Table 3 ELoFTR: 2.88 / 7.88 / 17.72
-num_matches: 458.32
+num_matches: 458.32 -->
+
+[per-class] (XoFTR aggregiate_scenes equivalent, units: %)
+  cloudy_cloudy                       auc@5: 18.605  auc@10: 36.957  auc@20: 54.856
+  cloudy_sunny                        auc@5: 12.087  auc@10: 26.551  auc@20: 45.586
+---
+[overall] (units: %)
+  all_class_mean                      auc@5: 15.346  auc@10: 31.754  auc@20: 50.221   
 
 roadscene
 
-precision@1px: 0.0805
+<!-- precision@1px: 0.0805
 precision@3px: 0.4641
-precision@5px: 0.7353
+precision@5px: 0.7353 -->
 
+precision@1px: 0.0809
+precision@3px: 0.4667
+precision@5px: 0.7407
 
 # v15 msyn 640 loss优化
 
+[per-class] (XoFTR aggregiate_scenes equivalent, units: %)
+  cloudy_cloudy                       auc@5: 18.224  auc@10: 35.581  auc@20: 53.008
+  cloudy_sunny                        auc@5: 12.375  auc@10: 27.108  auc@20: 45.229
+---
+[overall] (units: %)
+  all_class_mean                      auc@5: 15.300  auc@10: 31.344  auc@20: 49.119   
+
 roadscene
 
+precision@1px: 0.0815
+precision@3px: 0.4679
+precision@5px: 0.7401
 <!-- precision@1px: 0.0879
 precision@3px: 0.4899
 precision@5px: 0.7552 -->
