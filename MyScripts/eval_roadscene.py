@@ -110,6 +110,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--thresholds", type=float, nargs="+", default=[1.0, 3.0, 5.0])
     p.add_argument("--save_figures", action="store_true", default=True)
     p.add_argument("--no_save_figures", dest="save_figures", action="store_false")
+    p.add_argument("--max_save_figures", type=int, default=0,
+                   help="Cap visualisation figures to the first N pairs "
+                        "(1-indexed by loader iteration). 0 = save all "
+                        "(default). Useful for full-set eval where "
+                        "overall.txt should reflect every pair but you "
+                        "don't want hundreds of PNGs in out_dir.")
     p.add_argument("--device", default="cuda")
     p.add_argument("--thr", type=float, default=None,
                    help="Override LOFTR.MATCH_COARSE.THR.")
@@ -426,7 +432,8 @@ def main() -> None:
             )
         rows.append(per_pair)
 
-        if args.save_figures:
+        if args.save_figures and (args.max_save_figures <= 0
+                                  or idx <= args.max_save_figures):
             fig_path = out_dir / f"{Path(pair_short).stem}_match.png"
             _save_pair_figure(fig_path, batch, pixel_errs, args.thresholds,
                               ckpt_path.name, pair_short, args.apply_homography,

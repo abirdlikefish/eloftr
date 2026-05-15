@@ -3,10 +3,12 @@ name: eloftr-v15-pose-contrast
 description: |
   EfficientLoFTR v15 = v14 + v1 cross-modal symmetric InfoNCE contrastive
   loss. v15 vs v14 是 1 项改动 ablation——cfg.LOFTR.LOSS.USE_CONTRASTIVE
-  False -> True, 其他 (IMG_RESIZE=640, NPE [832,832,640,640], bs=4,
-  CANONICAL_LR 5e-4, WARMUP 450, MSLR [6,10,14], ES patience 5, N_SAMPLES=100,
-  max_ep=18, EVAL_TIMES=1, limit_val_batches=0.2, ENABLE_PLOTTING=False,
-  log_every_n_steps=500) 全部继承 v14.
+  False -> True, 其他 (IMG_RESIZE=640, NPE 走 train.py:130 fallback
+  [832,832,832,832] 跟 v0-v13 一致 -- v14 初版误设 [832,832,640,640] 已修复
+  见 v14 cfg "NPE bug post-mortem", bs=4, CANONICAL_LR 5e-4, WARMUP 450,
+  MSLR [6,10,14], ES patience 5, N_SAMPLES=100, max_ep=18, EVAL_TIMES=1,
+  limit_val_batches=0.2, ENABLE_PLOTTING=False, log_every_n_steps=500)
+  全部继承 v14.
 
   v1 contrastive loss 简介 (复用 v1 contrast 实现, 见 .cursor/skills/eloftr-
   v1-contrast/SKILL.md):

@@ -1,9 +1,10 @@
 @echo off
 REM ============================================================
 REM  eval_metu_vistir_finetuned.bat
-REM  Sister of eval_metu_vistir_official.bat. Evaluates v10/v11/v12+
-REM  (msyn-trained) ckpts on METU_VISTIR (real-captured drone VIS+LWIR
-REM  pairs) under the same protocol as the ELoFTR baseline run by
+REM  Sister of eval_metu_vistir_official.bat. Evaluates ANY finetuned
+REM  ckpt (v0..v9 RoadScene/M3FD-trained or v10/v11/v12+ Megadepth_Syn-
+REM  trained) on METU_VISTIR (real-captured drone VIS+LWIR pairs) under
+REM  the same protocol as the ELoFTR baseline run by
 REM  eval_metu_vistir_official.bat, so finetuned numbers and the
 REM  outdoor.ckpt baseline (paper Table 3 ELoFTR row 2.88 / 7.88 / 17.72)
 REM  are directly comparable.
@@ -38,27 +39,47 @@ REM  Usage:
 REM    eval_metu_vistir_finetuned.bat X [Y] [Z]
 REM
 REM  Inputs (all support -1 as "use default"):
-REM    X : version number (10, 11, 12, ...). Resolves to
-REM        logs\tb_logs\msyn_vX_* (auto-skips _debug / _small / sub-version
-REM        siblings X=10 will not pick v10_1). Required.
+REM    X : version number (0, 1, ..., 10, 11, 12, ...). Resolves to
+REM        logs\tb_logs\*_vX_* (any dataset prefix: roadscene_, m3fd_,
+REM        msyn_, ...). Auto-skips _debug / _small / sub-version siblings
+REM        (X=6 will not pick v6_1; X=10 will not pick v10_1). Required.
 REM    Y : lightning version_Y under that experiment (optional; default
 REM        = numeric max).
-REM    Z : ckpt rank by RANK_KEY=precision@3px (optional; default = 1).
+REM    Z : ckpt rank by RANK_KEY (optional; default = 1).
+REM        RANK_KEY auto-detects from ckpt filename:
+REM          - if 'auc@10=...' is present  -> sort by auc@10 desc
+REM            (v13+ pose-supervised pipeline; train-time monitor='auc@10').
+REM          - elif 'precision@3px=...' is present -> sort by precision@3px desc
+REM            (v0-v12 H-supervised pipeline; train-time monitor='precision@3px').
+REM          - else -> ckpt gets score -1 and falls back to filename order.
 REM        1..5 = pick the 1st..5th best ckpt; 6 = last.ckpt.
 REM
-REM  cfg picked: configs\loftr\eloftr_full_vX*msyn*.py (glob to msyn
-REM              series only; baseline eloftr_full.py and m3fd configs
-REM              are excluded).
+REM  cfg picked: configs\loftr\eloftr_full_vX_*.py
+REM              (auto-glob with sub-version skip filter; e.g. X=0 picks
+REM               eloftr_full_v0_baseline.py, X=10 picks v10_msyn_*.py
+REM               and the multi-match warning surfaces both ddp/singlecard).
 REM
 REM  Output: dump\metu_eval_v<X>_version<Y>_<topZ|last>\all\overall.txt
 REM          (per-class breakdown appears inside the same overall.txt;
 REM          single full-set run, no need for 3-subset loop).
 REM
 REM  Examples:
+REM    eval_metu_vistir_finetuned.bat 0            -> v0 (RoadScene-trained)
+REM    eval_metu_vistir_finetuned.bat 6_1          -> v6_1 (M3FD-trained)
 REM    eval_metu_vistir_finetuned.bat 10           -> v10 best p@3px
 REM    eval_metu_vistir_finetuned.bat 10 -1 6      -> v10 last.ckpt
 REM    eval_metu_vistir_finetuned.bat 11           -> v11 best p@3px
 REM    eval_metu_vistir_finetuned.bat 10 0 1       -> v10 version_0 top1
+REM
+REM  Note on side0/side1:
+REM    cfg default is METU_SIDE0='thermal' / METU_SIDE1='vis' (set in
+REM    configs\data\metu_vistir_test_all.py). This matches every finetuned
+REM    ckpt's training-time convention -- v0..v9 (RoadScene / M3FD via
+REM    src/datasets/roadscene.py L376-378) AND v10+ (Megadepth_Syn) all
+REM    put IR in image0 at training. modemb_ir, when used (v2+), is bound
+REM    to image0 so thermal-as-image0 stays correct. Do NOT override here.
+REM    The only side0=vis case is eval_metu_vistir_official.bat which
+REM    runs outdoor.ckpt (RGB-RGB MegaDepth, never saw IR).
 REM ============================================================
 
 setlocal enabledelayedexpansion
@@ -68,10 +89,17 @@ cd /d "%~dp0.."
 set PYTHONPATH=%CD%;%PYTHONPATH%
 
 set "LOGS_DIR=logs\tb_logs"
-REM ckpt sort key. Today's v10/v11 ModelCheckpoint monitors precision@3px
-REM (RoadScene/M3FD/Megadepth_Syn pipeline). v12+ that monitors auc-style
-REM values can flip this single line, e.g. set "RANK_KEY=auc@10".
-set "RANK_KEY=precision@3px"
+REM ckpt sort key. ModelCheckpoint monitor differs per training pipeline:
+REM   v0-v12  (H-supervised RoadScene/M3FD/Megadepth_Syn) -> monitor='precision@3px'
+REM           -> ckpt filename: epoch=*-precision@1px=*-precision@3px=*-precision@5px=*.ckpt
+REM   v13+    (pose-supervised Megadepth_Syn LoFTR-style)  -> monitor='auc@10'
+REM           -> ckpt filename: epoch=*-auc@5=*-auc@10=*-auc@20=*.ckpt
+REM The powershell sort below tries 'auc@10=' first (v13+) and falls back to
+REM 'precision@3px=' (v0-v12) so the same bat works for both ckpt families
+REM without manual switching. RANK_KEY here is a display-only label used in
+REM echo + error messages; the actual sort logic is hardcoded in the
+REM powershell line.
+set "RANK_KEY=auc@10 -> precision@3px (auto)"
 
 REM ---- read inputs (cli or interactive) -----------------------------------
 set "X=%~1"
@@ -114,13 +142,14 @@ if "!VALID_Z!"=="0" (
 )
 
 REM ---- resolve experiment directory ---------------------------------------
-REM EXP glob is msyn_v<X>_* because pose-based eval is for v10/v11+ which
-REM all live under logs\tb_logs\msyn_v<X>_<suffix>. Sub-version skip: when
-REM X=10, msyn_v10_* greedy-matches msyn_v10_1 (hypothetical future) whose
-REM tail (after _v10_) starts with `1`. Reject those so X=10 never picks
-REM v10_1's logs and vice versa.
+REM EXP glob *_v%X%_* matches any dataset prefix (roadscene_, m3fd_, msyn_, ...)
+REM so the same script can eval v0..v9 (RoadScene/M3FD-trained) and
+REM v10/v11/v12+ (Megadepth_Syn-trained) ckpts on METU under one protocol.
+REM Sub-version skip: when X=10, *_v10_* greedy-matches msyn_v10_1
+REM (hypothetical future) whose tail (after _v10_) starts with `1`. Reject
+REM those so X=10 never picks v10_1's logs and vice versa.
 set "EXP="
-for /d %%D in ("%LOGS_DIR%\msyn_v%X%_*") do (
+for /d %%D in ("%LOGS_DIR%\*_v%X%_*") do (
     set "name=%%~nxD"
     set "tail=!name:*_v%X%_=!"
     set "first=!tail:~0,1!"
@@ -135,7 +164,7 @@ for /d %%D in ("%LOGS_DIR%\msyn_v%X%_*") do (
 )
 
 if "%EXP%"=="" (
-    echo [ERROR] no msyn experiment found for v%X% under %LOGS_DIR%\msyn_v%X%_*
+    echo [ERROR] no experiment found for v%X% under %LOGS_DIR%\*_v%X%_*
     echo         ^(excluding _debug / _small^)
     pause
     exit /b 1
@@ -181,7 +210,13 @@ if not exist "!CKPT_DIR!" (
     exit /b 1
 )
 
-REM ---- pick ckpt by Z (rank by RANK_KEY desc) ----------------------------
+REM ---- pick ckpt by Z (rank by auc@10 -> precision@3px desc) -------------
+REM Z=6 -> last.ckpt. Z=1..5 -> Z-th best ckpt under the auto-detected
+REM RANK_KEY (auc@10 for v13+ pose ckpts, precision@3px for v0-v12 H ckpts;
+REM see L86-95 above for the auto-detect rationale). The powershell sort
+REM key uses an if/elseif so both ckpt families are ranked correctly in
+REM one bat invocation -- mixing the two in the same checkpoints/ dir is
+REM not expected, but if it happens auc@10 wins (v13+ takes precedence).
 if "!Z!"=="6" (
     set "FT_CKPT=!CKPT_DIR!\last.ckpt"
     set "Z_TAG=last"
@@ -189,7 +224,7 @@ if "!Z!"=="6" (
     set "Z_TAG=top!Z!"
     set "TMP_RES=%TEMP%\eloftr_metu_ckpt_choice_!RANDOM!!RANDOM!.txt"
     if exist "!TMP_RES!" del "!TMP_RES!"
-    powershell -NoProfile -Command "Get-ChildItem -Path '!CKPT_DIR!' -Filter 'epoch=*.ckpt' -ErrorAction SilentlyContinue | Sort-Object { if ($_.Name -match '!RANK_KEY!=([\d.]+)') { [double]$matches[1] } else { -1 } } -Descending | Select-Object -Skip (!Z!-1) -First 1 -ExpandProperty FullName | Out-File -FilePath '!TMP_RES!' -Encoding oem"
+    powershell -NoProfile -Command "Get-ChildItem -Path '!CKPT_DIR!' -Filter 'epoch=*.ckpt' -ErrorAction SilentlyContinue | Sort-Object { if ($_.Name -match 'auc@10=([\d.]+)') { [double]$matches[1] } elseif ($_.Name -match 'precision@3px=([\d.]+)') { [double]$matches[1] } else { -1 } } -Descending | Select-Object -Skip (!Z!-1) -First 1 -ExpandProperty FullName | Out-File -FilePath '!TMP_RES!' -Encoding oem"
     set "FT_CKPT="
     if exist "!TMP_RES!" (
         for /f "usebackq delims=" %%F in ("!TMP_RES!") do if "!FT_CKPT!"=="" set "FT_CKPT=%%F"
@@ -211,13 +246,15 @@ if not exist "!FT_CKPT!" (
 )
 
 REM ---- cfg ----------------------------------------------------------------
-REM Glob configs\loftr\eloftr_full_v<X>*msyn*.py to pin the cfg to the
-REM msyn-series (v10_msyn_ddp / v10_msyn_singlecard / v11_dualh_aggressive_msyn_ddp).
-REM Sub-version skip is unnecessary here because the _msyn_ infix already
-REM rules out baseline / m3fd / roadscene cfgs.
+REM Glob configs\loftr\eloftr_full_v<X>_*.py to pick the matching cfg
+REM regardless of suffix (baseline / finetune / msyn_ddp / dualh_aggressive_
+REM msyn_ddp etc). Sub-version skip: when X=6, eloftr_full_v6_*.py matches
+REM both v6_finetune.py and v6_1_finetune.py; reject the latter so X=6
+REM picks only v6_finetune.py (and X=6_1 picks only v6_1_finetune.py).
+REM Same convention as eval_roadscene_finetuned.bat L218-244.
 set "FT_CFG="
 set "N_CFG=0"
-for %%F in ("configs\loftr\eloftr_full_v%X%*msyn*.py") do (
+for %%F in ("configs\loftr\eloftr_full_v%X%_*.py") do (
     set "cname=%%~nF"
     set "ctail=!cname:*eloftr_full_v%X%_=!"
     set "cfirst=!ctail:~0,1!"
@@ -229,13 +266,14 @@ for %%F in ("configs\loftr\eloftr_full_v%X%*msyn*.py") do (
     )
 )
 if "!FT_CFG!"=="" (
-    echo [ERROR] no cfg matching configs\loftr\eloftr_full_v%X%*msyn*.py
+    echo [ERROR] no cfg matching configs\loftr\eloftr_full_v%X%_*.py
+    echo         ^(sub-version siblings, if any, are skipped on purpose^)
     pause
     exit /b 1
 )
 if !N_CFG! GTR 1 (
-    echo [WARN] multiple cfgs match eloftr_full_v%X%*msyn*.py:
-    for %%F in ("configs\loftr\eloftr_full_v%X%*msyn*.py") do echo           %%~nxF
+    echo [WARN] multiple cfgs match eloftr_full_v%X%_*.py:
+    for %%F in ("configs\loftr\eloftr_full_v%X%_*.py") do echo           %%~nxF
     echo        using !FT_CFG!
 )
 

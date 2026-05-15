@@ -10,7 +10,16 @@ REM    - ransac_thr=1.5, ransac_times=1 (single estimate_pose call)
 REM    - long edge = 640 (paper Sec 5.1: "long dimension equal to 640")
 REM    - LOFTR.MATCH_COARSE.THR = 0.2 (MINIMA load_loftr default)
 REM    - NPE off (test long edge 640 < train 832; no extrapolation needed)
-REM    - side0=vis / side1=thermal (mirrors MINIMA load_vis_tir_pairs_npz)
+REM    - side0=thermal / side1=vis (aligned with eval_metu_vistir_finetuned.bat
+REM      so the two bats feed the network the same modality order:
+REM      image0 = thermal/IR, image1 = visible. cfg default in
+REM      configs\data\metu_vistir_test_all.py is also thermal/vis.)
+REM      Note: this is NOT the MINIMA reference order (MINIMA uses
+REM      image0=vis / image1=thermal). outdoor.ckpt is RGB-RGB MegaDepth
+REM      trained and has no modality-specific weights, so feeding
+REM      thermal-as-image0 is symmetric and only changes which side gets
+REM      labeled "image0" inside the dataset; AUC numbers stay comparable
+REM      across the two side conventions for outdoor.ckpt.
 REM    - undistort via cv2.getOptimalNewCameraMatrix alpha=0 -> new_K
 REM      (dataset side, see src/datasets/metu_vistir.py L254-273)
 REM    - pad_to_square=False (dataset default; bs=1 forward at native shape)
@@ -22,6 +31,11 @@ REM  (RGB-RGB MegaDepth-1500: ransac_thr=0.5 / 5-restart / megasize=1152
 REM  + NPE / pool 2590 pair into single error_auc). That underestimated
 REM  METU AUC by ~10-20x and is no longer used. See plan
 REM  align-metu-eval-minima_*.plan.md for protocol audit details.
+REM  Side convention: previously this bat used MINIMA-style
+REM  side0=vis / side1=thermal. Switched to thermal/vis 2026-05-15 so
+REM  outdoor.ckpt and finetuned ckpts go through the network with the
+REM  same image0/image1 modality assignment, simplifying cross-version
+REM  comparison.
 REM
 REM  Output: dump\metu_eval_official\all\overall.txt (single full set run;
 REM  per-class breakdown is computed inside python from per-scene AUCs).
@@ -74,7 +88,10 @@ echo   Cfg (LoFTR): !FT_CFG!
 echo   Out dir    : !OUT_DIR!
 echo   Protocol   : MINIMA / XoFTR (CVPR 2025)
 echo                ransac_thr=1.5  times=1  thr=0.2  megasize=640  npe=off
-echo                side0=vis  side1=thermal  pad_to_square=False
+echo                side0=thermal  side1=vis  pad_to_square=False
+echo                (aligned with eval_metu_vistir_finetuned.bat for cross-
+echo                 version comparison; differs from MINIMA reference order
+echo                 vis/thermal -- see header for rationale)
 echo                target: paper Table 3 ELoFTR = 2.88 / 7.88 / 17.72
 echo ============================================================
 echo.
@@ -92,14 +109,21 @@ REM   --thr 0.2         MATCH_COARSE.THR matches MINIMA load_loftr default
 REM                     + eloftr_full.py cfg ("recommend 0.2 for full model")
 REM   --megasize 640    paper Sec 5.1 "long dimension equal to 640"
 REM                     (no --npe: test long edge 640 < train 832, no need)
-REM   --metu_side0 vis  image0 = visible side (mirrors MINIMA load_vis_tir_pairs_npz
-REM   --metu_side1 thermal   image_paths[id0][0]=visible, [id1][1]=thermal)
+REM   side0 / side1     NOT overridden here. cfg default in
+REM                     configs\data\metu_vistir_test_all.py is
+REM                     METU_SIDE0='thermal' / METU_SIDE1='vis', matching
+REM                     eval_metu_vistir_finetuned.bat. outdoor.ckpt is
+REM                     RGB-RGB and modality-symmetric, so feeding
+REM                     thermal-as-image0 vs vis-as-image0 yields the same
+REM                     AUC (essential matrix recovers identical pose).
+REM                     This differs from MINIMA's reference vis/thermal
+REM                     order; kept thermal/vis to align the two bats.
 REM
 REM Note: prior protocol used --thr 0.1 --megasize 1152 --npe which is
 REM ELoFTR's RGB-RGB MegaDepth-1500 reproduce config (outdoor_full_auc.sh);
 REM that drastically under-reports METU AUC. See plan
 REM align-metu-eval-minima_*.plan.md.
-set "OFFICIAL_PROTOCOL=--thr 0.2 --megasize 640 --metu_side0 vis --metu_side1 thermal"
+set "OFFICIAL_PROTOCOL=--thr 0.2 --megasize 640"
 
 REM ====================================================================
 REM  SUBSETS: under MINIMA protocol the visualize_metu_vistir.py python

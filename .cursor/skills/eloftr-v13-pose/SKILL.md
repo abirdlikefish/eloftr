@@ -182,7 +182,7 @@ config.merge_from_file(args.data_cfg_path)
 
 **caveat**: 如果 main cfg 设了 `cfg.DATASET.MGDPT_IMG_RESIZE`, 会被 data cfg 覆盖。所以 IMG_RESIZE 必须在 data cfg 里设, 不能在 main cfg。
 
-NPE (跨分辨率 RoPE 校准): v13 cfg 没显式设 `cfg.LOFTR.COARSE.NPE`, 走 `train.py:130` fallback `[832, 832, 832, 832]`。当前数据是 832, fallback 也对。**v14 改 640 训时必须显式设 `[832, 832, 640, 640]`** 否则 RoPE 频率没按比例校准。详情见 v14 skill / `position_encoding.py:21-22` 的 train_res / test_res 比例 stretch 算法。
+NPE (跨分辨率 RoPE 校准): v13 cfg 没显式设 `cfg.LOFTR.COARSE.NPE`, 走 `train.py:130` fallback `[832, 832, 832, 832]`。当前数据是 832, fallback 也对。**v14 改 640 训时也仍然走 fallback `[832, 832, 832, 832]` 不显式设**——v14 初版误以为 "640 训应设 NPE [832,832,640,640] 让 RoPE 跨分辨率校准", 实测踩 stretch bug (ratio=1.3 让 RoPE position phase 错位 50%, ep0 auc@10=0.214 < outdoor.ckpt 0.30+ baseline)。根因: `position_encoding.py:21-22` 的 train_res / test_res stretch 是给 **extrapolation** 用的 (input > train_res); v14 long_side 640 < 832 是 **interpolation**, integer position (1..20) 是 outdoor.ckpt 学过 (1..26) 的子集, **不该 stretch**。详见 v14 skill "NPE bug post-mortem"。
 
 ## 4. ship 实测：9 ep × 25h
 
@@ -252,6 +252,6 @@ acceptance gate (METU all auc@20):
 
 ## 7. 后续派生：v14 (resolution ablation)
 
-v13 的 832 path 跟 METU eval 的 640 path 存在 train/eval domain mismatch (NPE frequency / AGG attention spatial pattern / fine_window 物理覆盖率三层)。**v14 = v13 + IMG_RESIZE 832→640 + NPE [832,832,640,640] 跨分辨率校准 + bs=4 + 多维工程加速 (~9h ship vs v13 25h, 2.8x)**。详见 [eloftr-v14-resolution-640](../eloftr-v14-resolution-640/SKILL.md)。
+v13 的 832 path 跟 METU eval 的 640 path 存在 train/eval domain mismatch (AGG attention spatial pattern / fine_window 物理覆盖率两层; NPE 那层 v14 实测证明走 fallback `[832,832,832,832]` 不 stretch 反而最优, 因 640 < 832 是 interpolation 不该 stretch, 见 v14 skill §1.1 + "NPE bug post-mortem")。**v14 = v13 + IMG_RESIZE 832→640 + NPE 走 fallback (不显式设) + bs=4 + 多维工程加速 (~9h ship vs v13 25h, 2.8x)**。详见 [eloftr-v14-resolution-640](../eloftr-v14-resolution-640/SKILL.md)。
 
 v14 vs v13 是干净的训练分辨率 ablation——训练 fingerprint 仅由 IMG_RESIZE 主导, 其他都是"语义等效"或"工程加速"。

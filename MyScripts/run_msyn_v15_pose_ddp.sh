@@ -7,10 +7,11 @@
 # 见 configs/loftr/eloftr_full_v15_pose_msyn_ddp.py docstring 完整 rationale.
 #
 # v15 训练 fingerprint 仅由 USE_CONTRASTIVE 1 个 cfg 区分, 其他全部继承 v14:
-#   IMG_RESIZE=640, NPE [832,832,640,640], bs=4, CANONICAL_LR 5e-4,
-#   WARMUP 450, MSLR [6,10,14], ES patience 5, N_SAMPLES=100, max_ep=18,
-#   EVAL_TIMES=1, limit_val_batches=0.2, ENABLE_PLOTTING=False,
-#   log_every_n_steps=500.
+#   IMG_RESIZE=640, NPE 走 train.py:130 fallback [832,832,832,832] (跟 v0-v13
+#   一致, v14 初版误设 [832,832,640,640] 已修复, 见 v14 cfg "NPE bug
+#   post-mortem"), bs=4, CANONICAL_LR 5e-4, WARMUP 450, MSLR [6,10,14],
+#   ES patience 5, N_SAMPLES=100, max_ep=18, EVAL_TIMES=1,
+#   limit_val_batches=0.2, ENABLE_PLOTTING=False, log_every_n_steps=500.
 #
 # Diff vs run_msyn_v14_pose_ddp.sh (3 处, 其他全部一致):
 #   1. main_cfg : configs/loftr/eloftr_full_v14_pose_msyn_ddp.py

@@ -1,35 +1,35 @@
 ---
 name: eloftr-v14-resolution-640
 description: |
-  EfficientLoFTR v14 = v13 多维优化版 (训练分辨率 832->640 + 9 项工程加速),
-  cfg 继承 v13 ddp + 8 项 overrides, sh 改 7 处. v14 vs v13 是干净的训练
+  EfficientLoFTR v14 = v13 多维优化版 (训练分辨率 832->640 + 多项工程加速),
+  cfg 继承 v13 ddp + 7 项 overrides, sh 改 7 处. v14 vs v13 是干净的训练
   分辨率 ablation——训练 fingerprint 仅由 IMG_RESIZE 主导, 其他都是"语义
   等效" (反向缩放保 TRUE_LR/actual WARMUP step 不变, schedule 等比例放大保
   sample-pass 总量不变) 或"工程加速" (val 协议跟 eval bat 一致, TB 数据
   精简 80%).
 
-  v14 13 项改动 / 6 组逻辑动机:
+  v14 12 项改动 / 5 组逻辑动机 (NPE bug 已删除, 详见 v14 cfg "NPE bug
+  post-mortem"; 历史上 v14 初版误加 NPE [832,832,640,640] 让 RoPE 跨分辨率
+  stretch ratio=1.3, 实测 ep0 auc@10=0.214 < outdoor.ckpt baseline 0.30+,
+  根因 stretch 是 extrapolation 用的, v14 long_side 640 < 832 是 interpolation
+  不该 stretch; 修复后 v14 不显式设 NPE 走 train.py:130 fallback
+  [832,832,832,832] 跟 v0-v13 一致):
   1. 核心 ablation 变量 (1 项): MGDPT_IMG_RESIZE 832 -> 640 (in data cfg
      megadepth_syn_pose_640.py, NOT main cfg, 因 train.py:127 merge 顺序
      data_cfg AFTER main_cfg, main 设 IMG_RESIZE 会被覆盖)
-  2. NPE 配套校准 (1 项): cfg.LOFTR.COARSE.NPE = [832, 832, 640, 640]
-     (v13 None 走 train.py:130 fallback [832,832,832,832], 当前 832 也对;
-     v14 改 640 必须显式设, 否则 RoPE 频率没按比例校准 = v0-v12 那种潜在 bug;
-     position_encoding.py:21-22 train_res / test_res 比例 stretch 让
-     outdoor.ckpt 832 训过的模型在 640 input 上看到的位置距离尺度跟训练时一致)
-  3. bs + LR/WARMUP 反向缩放 (3 项): bs 2->4, CANONICAL_LR 1e-3->5e-4,
+  2. bs + LR/WARMUP 反向缩放 (3 项): bs 2->4, CANONICAL_LR 1e-3->5e-4,
      WARMUP_STEP 225->450 (TRUE_LR=1.25e-4 / actual WARMUP step=1800 跟
      v13/v10/v9 完全一致)
-  4. val 加速 (2 项): EVAL_TIMES 5->1 (跟 eval_metu_vistir_finetuned.bat
+  3. val 加速 (2 项): EVAL_TIMES 5->1 (跟 eval_metu_vistir_finetuned.bat
      --ransac_times 1 协议完全一致, best-ckpt 选择 trend 不受影响),
      --limit_val_batches 0.5->0.2 (val 实跑 4493*0.2=899 pair, 跟 LoFTR
      megadepth_val_1500 业界 1500 pair 量级一致)
-  5. N + schedule 等比例放大 (4 项): N_SAMPLES_PER_SUBSET 200->100 (LoFTR
+  4. N + schedule 等比例放大 (4 项): N_SAMPLES_PER_SUBSET 200->100 (LoFTR
      paper default), max_ep 12->18 (N 砍半 -> ep 翻倍补偿 + ES 余地),
      MSLR_MILESTONES [3,5,7]->[6,10,14] (sample-pass 角度等效),
      EARLY_STOPPING_PATIENCE 3->5 (ep 等比例略压: 3/12=25% vs 5/18=28%);
      总 sample-pass v14 ~156K 跟 v13 ES 早停后实际 ~158K 等效
-  6. TB 精简 (2 项): ENABLE_PLOTTING True->False (lightning_loftr.py:562
+  5. TB 精简 (2 项): ENABLE_PLOTTING True->False (lightning_loftr.py:562
      train figure 关掉, val figure 不受影响, events 1.1GB->220MB),
      --log_every_n_steps 50->500 (scalar 10x 稀疏 + step 加速 3-5%)
 
@@ -95,18 +95,24 @@ description: |
              顺序错; 查 train.py:129-130
 
   风险点:
-  - NPE 字段没生效: train.py:129 if config.LOFTR.COARSE.NPE is None: ... =
-    [832,832,832,832] 只在 None 时 fallback. v14 显式设 [832,832,640,640]
-    不会被 fallback 覆盖 OK; 但要在 train.py 启动日志 grep cfg.LOFTR.COARSE.NPE
-    实际值确认.
+  - NPE bug 已修复 (post-mortem): v14 初版加了 cfg.LOFTR.COARSE.NPE =
+    [832,832,640,640] 想跨分辨率校准, 但实际 stretch ratio=1.3 让 RoPE
+    position phase 错位 50%, ep0 auc@10=0.214 < outdoor.ckpt baseline 0.30+.
+    根因: position_encoding.py:21-22 的 train_res / test_res stretch 是给
+    extrapolation 用的 (input > train, e.g. LoFTR paper MegaDepth1500 1152
+    input vs 832 train); v14 long_side 640 < 832 是 interpolation, integer
+    position (1..20) 是 outdoor.ckpt 学过 (1..26) 的子集, attention 兼容
+    良好, 不该 stretch. 修复: 删除 cfg.LOFTR.COARSE.NPE 显式设, 让
+    train.py:130 fallback [832,832,832,832] (ratio=1.0). 跑 v14 / 衍生
+    版本前再次检查 cfg 是否误加 NPE override.
   - data cfg merge 顺序: v14 ddp main cfg 不要也设 MGDPT_IMG_RESIZE=640
     (会被 data cfg 覆盖, audit 时困惑; 在 main cfg 里设 IMG_RESIZE 是 dead
     code).
-  - outdoor.ckpt 加载兼容: outdoor.ckpt 是 832 train, 包含 RoPE buffer 的
-    sin/cos 是按 max_shape=(256,256) + npe=[832,832,832,832] 算的. v14 加载
-    时 RoPE buffer 会被 v14 NPE=[832,832,640,640] 重新算 (register_buffer
-    persistent=False 不入 ckpt, 见 position_encoding.py:37-38). v14 自动
-    用新 NPE 算 buffer, 不冲突.
+  - outdoor.ckpt 加载兼容: outdoor.ckpt 是 832 train, RoPE buffer sin/cos
+    按 max_shape=(256,256) + npe=[832,832,832,832] 算. v14 fallback NPE
+    跟 outdoor.ckpt 完全一致 (都是 [832,832,832,832] 不 stretch),
+    register_buffer(persistent=False) 不入 ckpt (position_encoding.py:37-38),
+    v14 自动用 fallback NPE 算 buffer, 完全兼容.
   - bs=4 显存预算: 实测 832+bs=4 OOM, 640+bs=4 理论 -29% sim_matrix peak +
     4 GB cuDNN/NCCL 实测预期 ~17 GB / 卡, 留 7 GB 余量, 安全. 首次跑前
     nvidia-smi 看稳态值.
@@ -123,16 +129,16 @@ description: |
   ckpt 决定派生.
 
   Triggers: v14 / v14_pose / v14_resolution_640 / msyn_v14_pose_ddp /
-  IMG_RESIZE 832 -> 640 / NPE [832,832,640,640] / megadepth_syn_pose_640.py /
-  RoPE position scaler 832/640 = 1.3 / position_encoding.py train_res
-  test_res / sim_matrix 砍 29% / bs 2 -> 4 反向缩放 / CANONICAL_LR 1e-3 ->
-  5e-4 / WARMUP_STEP 225 -> 450 / TRUE_LR 1.25e-4 不变 / EVAL_TIMES 5 ->
-  1 / limit_val_batches 0.5 -> 0.2 / N_SAMPLES_PER_SUBSET 200 -> 100 (LoFTR
-  paper default) / max_ep 12 -> 18 / MSLR [3,5,7] -> [6,10,14] / ES patience
-  3 -> 5 / ENABLE_PLOTTING False / log_every_n_steps 50 -> 500 / events
-  1.1GB -> 220MB / wall-clock 25h -> 9h / GPU 2 thermal throttling / 13
-  项改动 / 6 组逻辑动机 / 显存 17 GB / 卡 / METU 640 协议 train/eval
-  match / LWIR thermal native 640 假高频问题,
+  IMG_RESIZE 832 -> 640 / NPE bug post-mortem / NPE stretch interpolation
+  vs extrapolation / NPE fallback [832,832,832,832] / position_encoding.py
+  train_res test_res / megadepth_syn_pose_640.py / sim_matrix 砍 29% /
+  bs 2 -> 4 反向缩放 / CANONICAL_LR 1e-3 -> 5e-4 / WARMUP_STEP 225 -> 450 /
+  TRUE_LR 1.25e-4 不变 / EVAL_TIMES 5 -> 1 / limit_val_batches 0.5 -> 0.2 /
+  N_SAMPLES_PER_SUBSET 200 -> 100 (LoFTR paper default) / max_ep 12 -> 18 /
+  MSLR [3,5,7] -> [6,10,14] / ES patience 3 -> 5 / ENABLE_PLOTTING False /
+  log_every_n_steps 50 -> 500 / events 1.1GB -> 220MB / wall-clock 25h ->
+  9h / GPU 2 thermal throttling / 12 项改动 / 5 组逻辑动机 / 显存 17 GB /
+  卡 / METU 640 协议 train/eval match / LWIR thermal native 640 假高频问题,
   English 'resolution ablation 832 to 640', 'NPE cross-resolution RoPE
   calibration', 'sim_matrix 4-th power resolution scaling', 'reverse-scale
   LR/WARMUP keep TRUE_LR invariant', 'N_SAMPLES schedule equiproportional
@@ -168,24 +174,34 @@ description: |
 > 跨版本数字 → [eloftr-results](../eloftr-results/SKILL.md) → [`results/eval_summary.md`](../../../results/eval_summary.md)
 > **状态**：plan-only, ship pending. 等 v13 ship 完成 + METU eval 拿数字后决定是否跑.
 
-## 1. 设计意图：跨分辨率校准让 train/eval 协议一致
+## 1. 设计意图：训练分辨率 832->640 消除 train/eval mismatch + 工程加速
 
-v13 训练 832 + METU eval 640 (MINIMA / XoFTR paper Sec 5.1 协议要求)。这造成 3 层 train/eval mismatch：
+v13 训练 832 + METU eval 640 (MINIMA / XoFTR paper Sec 5.1 协议要求)。这造成 2 层 train/eval mismatch（**NPE 那层 v14 实践证明不是问题**, 见 §1.1）：
 
-1. **NPE / RoPE 位置编码 frequency mismatch**: v13 cfg 没显式设 NPE, 走 `train.py:130` fallback `[832,832,832,832]`。eval 时 visualize_metu_vistir.py L143-154 强制 override 成 `[832,832,640,640]` 让 RoPE position scaler = 1.3. 但**训练时**模型已经按"832 域 frequency"优化了 attention 权重, eval 时强行 stretch 是事后补偿, 有损耗。
-2. **AGG attention spatial pattern**: v13 训练时 attention 跑 26x26 (832/8/4); eval 跑 20x20 (640/8/4). 学到的"哪些 spatial position 该 attend"不严格对齐。
-3. **fine_window 物理覆盖率**: 8x8 fine window 在 832 占 0.96% 长边, 640 占 1.25%。模型学的 sub-pixel regression 校准范围在 eval 时拉大 30%。
+1. **AGG attention spatial pattern**: v13 训练时 attention 跑 26x26 (832/8/4); eval 跑 20x20 (640/8/4). 学到的"哪些 spatial position 该 attend"不严格对齐。
+2. **fine_window 物理覆盖率**: 8x8 fine window 在 832 占 0.96% 长边, 640 占 1.25%。模型学的 sub-pixel regression 校准范围在 eval 时拉大 30%。
 
-v14 想回答：
+v14 直接训 640, 让训练 attention 跑 20x20 + fine_window 占 1.25% 跟 eval 完全对齐, 同时享受 bs=4 (sim_matrix 砍 29%) 的工程加速。
 
-> **如果训练也用 640, NPE 显式设 [832, 832, 640, 640] 让 RoPE 跟 outdoor.ckpt 训练域 frequency 同尺度, 是不是能消除三层 mismatch + 同时享受 bs=4 的工程加速？**
+### 1.1 NPE 层 mismatch: v14 初版误判 + 修复后的认知
+
+v14 初版以为"训练 640 + NPE 设 [832, 832, 640, 640] (ratio=1.3 stretch RoPE position) 让 outdoor.ckpt 832 训过的 RoPE frequency 在 640 input 上跟训练时同尺度"会消除第三层 NPE mismatch。**但实测踩 bug**: ep0 auc@10=0.214 vs v13 ep0=0.376 (跌 43%, 比 outdoor.ckpt cold start baseline ~0.30 还差)。
+
+根因 (见 v14 cfg "NPE bug post-mortem"):
+- `position_encoding.py:21-22` 的 `i_position * train_res / test_res` stretch 是给 **extrapolation** 用的 (input long_side > train res, e.g. LoFTR paper MegaDepth1500 1152 input vs 832 train, position 144 stretch 回 (1*0.72, 2*0.72, ..., 144*0.72) = (0.72, 1.44, ..., 104) 让 RoPE freq 还在 ckpt 学过的范围).
+- v14 long_side 640 < 832 是 **interpolation**, integer position (1..20) 是 outdoor.ckpt 学过 (1..26) 的子集, attention 完美兼容, **不该 stretch**.
+- ratio=1.3 stretch 让 cos(1.3) vs cos(1) = 0.27 vs 0.54, 低频维度 attention pattern 被破坏 50%.
+
+修复: 删除 cfg.LOFTR.COARSE.NPE 显式设, 让 train.py:130 fallback [832,832,832,832] (ratio=1.0 不 stretch, 跟 v0-v13 一致)。
+
+**所以 v14 实际只消除 2 层 mismatch (AGG attention + fine_window), NPE 层走"什么都不做"反而比 stretch 好**。这是 v14 ship 的关键 insight: **不 stretch RoPE 让 outdoor.ckpt 的 attention pattern 直接复用 (640 position 是 832 的子集)**。
 
 ## 2. 5 个文件 (零 src/ 改动) + cfg 继承链
 
 | 文件 | 关键设计 |
 |---|---|
 | [`configs/data/megadepth_syn_pose_640.py`](../../../configs/data/megadepth_syn_pose_640.py) | 80 行。从 v13 [`megadepth_syn_pose_trainval.py`](../../../configs/data/megadepth_syn_pose_trainval.py) copy, 仅改 `MGDPT_IMG_RESIZE 832->640`. 其他全部保留 (LIST_PATH / DF / IMG_PAD / DEPTH_PAD / CROSS_MODAL_MODE='ir2vis' / NPE_NAME='megadepth'). |
-| [`configs/loftr/eloftr_full_v14_pose_msyn_ddp.py`](../../../configs/loftr/eloftr_full_v14_pose_msyn_ddp.py) | 115 行。继承 v13 ddp + **8 项 cfg overrides**: NPE / CANONICAL_LR / WARMUP_STEP / EVAL_TIMES / N_SAMPLES_PER_SUBSET / MSLR_MILESTONES / EARLY_STOPPING_PATIENCE / ENABLE_PLOTTING. docstring 含 v13 实测曲线 + v14 schedule 推算. |
+| [`configs/loftr/eloftr_full_v14_pose_msyn_ddp.py`](../../../configs/loftr/eloftr_full_v14_pose_msyn_ddp.py) | 115 行。继承 v13 ddp + **7 项 cfg overrides**: CANONICAL_LR / WARMUP_STEP / EVAL_TIMES / N_SAMPLES_PER_SUBSET / MSLR_MILESTONES / EARLY_STOPPING_PATIENCE / ENABLE_PLOTTING. docstring 含 v13 实测曲线 + v14 schedule 推算 + NPE bug post-mortem. (NPE 不显式设, 走 fallback [832,832,832,832] 跟 v0-v13 一致, 见 §1.1) |
 | [`configs/loftr/eloftr_full_v14_pose_msyn_singlecard.py`](../../../configs/loftr/eloftr_full_v14_pose_msyn_singlecard.py) | 23 行。继承 v14 ddp + 单卡反向缩放 (`CANONICAL_LR=2e-3, WARMUP_STEP=1800`). |
 | [`MyScripts/run_msyn_v14_pose_ddp.sh`](../../../MyScripts/run_msyn_v14_pose_ddp.sh) | 110 行。基于 v13 ddp.sh **改 7 处**: data_cfg / main_cfg / exp_name / batch_size 2->4 / limit_val_batches 0.5->0.2 / max_epochs 12->18 / log_every_n_steps 50->500. |
 | [`MyScripts/run_msyn_v14_pose_singlecard.sh`](../../../MyScripts/run_msyn_v14_pose_singlecard.sh) | 56 行。基于 v13 singlecard sh 改 4 处. smoke 不需改 schedule/log_every. |
@@ -204,7 +220,7 @@ eloftr_full.py (v0 baseline)
 | 字段 | v13 | **v14** | 来源类别 |
 |---|---|---|---|
 | `cfg.DATASET.MGDPT_IMG_RESIZE` (in data cfg) | 832 | **640** | 核心 ablation 变量 |
-| `cfg.LOFTR.COARSE.NPE` | None (-> fallback `[832,832,832,832]`) | **`[832, 832, 640, 640]`** | NPE 配套校准 |
+| `cfg.LOFTR.COARSE.NPE` | 不显式设 (fallback `[832,832,832,832]`) | **不显式设 (同 fallback)** | **不动** (v14 初版误设 [832,832,640,640] 踩 stretch bug 已修复, 见 §1.1) |
 | `cfg.TRAINER.CANONICAL_LR` | 1e-3 | **5e-4** | bs+LR 反向缩放 |
 | `cfg.TRAINER.WARMUP_STEP` | 225 | **450** | bs+LR 反向缩放 |
 | `cfg.LOFTR.EVAL_TIMES` | 5 (eloftr_full default) | **1** | val 加速 |

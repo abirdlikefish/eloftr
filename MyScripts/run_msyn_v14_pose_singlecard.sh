@@ -7,8 +7,9 @@
 # Gate: ep0 step 0 train_loss is finite (no NaN/Inf), and per-batch
 # spvs_coarse logs "b_ids >= 50" on average. If train_loss > 5 at step 0
 # something is wrong (compare v13 first-step ~0.65; v14 starts from
-# outdoor.ckpt at IMG_RESIZE=640 + NPE [832,832,640,640] cross-resolution
-# RoPE校准, first-step loss should be in the 0.5-2.0 range).
+# outdoor.ckpt at IMG_RESIZE=640 + NPE 走 train.py:130 fallback
+# [832,832,832,832] (interpolation 不 stretch, 见 v14 cfg "NPE bug
+# post-mortem"), first-step loss should be in the 0.5-2.0 range).
 #
 # Usage:
 #   bash MyScripts/run_msyn_v14_pose_singlecard.sh

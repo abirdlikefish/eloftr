@@ -221,3 +221,163 @@ $$
 本节在 3.X 节引入对比损失 $\mathcal{L}_{\text{ct}}$ 的基础上，进一步分析了 EfficientLoFTR 粗匹配 Transformer 的结构性模态盲问题——Q、K、V 投影矩阵在两模态间完全共享，attention 内部无任何机制可获知 token 的模态归属。为此本文引入一对可学习的 $C$ 维模态嵌入向量 $(\mathbf{e}_{\text{ir}}, \mathbf{e}_{\text{vis}})$，并通过对网络四个候选注入位置的可达性分析（表 3-1）证明：在 backbone 输出端、粗匹配 Transformer 输入端的加性注入是唯一可使模态信号同时作用于 Q、K、V 并通过残差通路传递至所有 attention 层的位置。模态嵌入在形式上与原始 LoFTR 的加性位置编码同构，但语义上对应自然语言处理中的 segment embedding，与 EfficientLoFTR 现行的 RoPE 在作用维度上完全正交。模态嵌入与对比损失分别构成结构归纳偏置与监督信号，共同作用于 Transformer 的入口与出口，形成对跨模态匹配的双侧约束。该模块仅引入 $2C = 512$ 个参数，采用零初始化策略保证从同模态预训练权重 finetune 的向后兼容性，并提供可观测的范数演化曲线作为训练动态诊断信号。
 
 需指出，本节可达性分析（表 3-1）同时表明：模态嵌入的有效作用范围被限定在粗匹配阶段——其经 Transformer 残差通路传递到 fine_preprocess 输入端的残余信号将被该模块内的 BatchNorm 完全消去，更不可能影响 fine_matching 中基于 argmax 的像素级输出。该结构性局限指向跨模态匹配中独立于 Transformer 的精修阶段瓶颈，构成本文后续章节中模态特异性归一化（modality-specific BatchNorm）等 fine 路径干预的设计动机。
+
+# official
+
+[per-scene] (units: %)
+  cloudy_cloudy_scene_1               auc@5:  2.143  auc@10:  7.941  auc@20: 16.837  pairs: 131
+  cloudy_cloudy_scene_2               auc@5:  4.897  auc@10: 12.484  auc@20: 25.639  pairs: 197
+  cloudy_cloudy_scene_3               auc@5:  0.541  auc@10:  1.807  auc@20:  8.705  pairs: 266
+  cloudy_cloudy_scene_4               auc@5:  0.988  auc@10:  2.998  auc@20:  9.391  pairs: 311
+  cloudy_cloudy_scene_5               auc@5:  1.923  auc@10:  8.006  auc@20: 19.969  pairs: 180
+  cloudy_cloudy_scene_6               auc@5:  4.642  auc@10: 10.732  auc@20: 21.823  pairs: 297
+  cloudy_sunny_scene_1                auc@5:  1.914  auc@10:  8.344  auc@20: 22.652  pairs: 195
+  cloudy_sunny_scene_2                auc@5:  7.934  auc@10: 16.891  auc@20: 29.369  pairs: 270
+  cloudy_sunny_scene_3                auc@5:  2.218  auc@10:  5.990  auc@20: 13.406  pairs: 289
+  cloudy_sunny_scene_4                auc@5:  0.544  auc@10:  2.634  auc@20:  8.440  pairs: 454
+---
+[per-class] (XoFTR aggregiate_scenes equivalent, units: %)
+  cloudy_cloudy                       auc@5:  2.522  auc@10:  7.328  auc@20: 17.061
+  cloudy_sunny                        auc@5:  3.152  auc@10:  8.465  auc@20: 18.467
+---
+[overall] (units: %)
+  all_class_mean                      auc@5:  2.837  auc@10:  7.896  auc@20: 17.764   # compare with MINIMA paper Table 3 ELoFTR: 2.88 / 7.88 / 17.72
+num_matches: 239.76
+
+roadscene
+
+precision@1px: 0.0648
+precision@3px: 0.2616
+precision@5px: 0.3960
+
+
+# v0 逐像素匹配
+
+[per-scene] (units: %)
+  cloudy_cloudy_scene_1               auc@5:  4.221  auc@10: 13.598  auc@20: 25.454  pairs: 131
+  cloudy_cloudy_scene_2               auc@5:  6.105  auc@10: 15.224  auc@20: 30.192  pairs: 197
+  cloudy_cloudy_scene_3               auc@5:  7.412  auc@10: 16.122  auc@20: 28.664  pairs: 266
+  cloudy_cloudy_scene_4               auc@5:  5.570  auc@10: 13.260  auc@20: 24.101  pairs: 311
+  cloudy_cloudy_scene_5               auc@5: 13.621  auc@10: 27.128  auc@20: 42.018  pairs: 180
+  cloudy_cloudy_scene_6               auc@5:  2.477  auc@10:  5.132  auc@20: 10.556  pairs: 297
+  cloudy_sunny_scene_1                auc@5:  1.586  auc@10:  6.588  auc@20: 18.508  pairs: 195
+  cloudy_sunny_scene_2                auc@5:  5.592  auc@10: 14.356  auc@20: 29.124  pairs: 270
+  cloudy_sunny_scene_3                auc@5:  3.170  auc@10:  9.917  auc@20: 20.843  pairs: 289
+  cloudy_sunny_scene_4                auc@5:  0.484  auc@10:  3.252  auc@20: 10.027  pairs: 454
+---
+[per-class] (XoFTR aggregiate_scenes equivalent, units: %)
+  cloudy_cloudy                       auc@5:  6.567  auc@10: 15.077  auc@20: 26.831
+  cloudy_sunny                        auc@5:  2.708  auc@10:  8.528  auc@20: 19.626
+---
+[overall] (units: %)
+  all_class_mean                      auc@5:  4.638  auc@10: 11.803  auc@20: 23.228   # compare with MINIMA paper Table 3 ELoFTR: 2.88 / 7.88 / 17.72
+num_matches: 517.81
+
+roadscene
+
+precision@1px: 0.2320
+precision@3px: 0.5665
+precision@5px: 0.6533
+
+# v12 msyn 逐像素匹配 832
+
+[per-scene] (units: %)
+  cloudy_cloudy_scene_1               auc@5:  2.786  auc@10:  7.700  auc@20: 13.965  pairs: 131
+  cloudy_cloudy_scene_2               auc@5:  3.761  auc@10: 12.641  auc@20: 26.452  pairs: 197
+  cloudy_cloudy_scene_3               auc@5:  7.028  auc@10: 14.011  auc@20: 23.096  pairs: 266
+  cloudy_cloudy_scene_4               auc@5:  8.182  auc@10: 13.352  auc@20: 19.816  pairs: 311
+  cloudy_cloudy_scene_5               auc@5:  9.194  auc@10: 20.383  auc@20: 34.686  pairs: 180
+  cloudy_cloudy_scene_6               auc@5:  0.738  auc@10:  2.393  auc@20:  6.565  pairs: 297
+  cloudy_sunny_scene_1                auc@5:  1.007  auc@10:  3.015  auc@20:  9.863  pairs: 195
+  cloudy_sunny_scene_2                auc@5:  4.233  auc@10: 12.230  auc@20: 26.251  pairs: 270
+  cloudy_sunny_scene_3                auc@5:  3.342  auc@10:  9.785  auc@20: 17.722  pairs: 289
+  cloudy_sunny_scene_4                auc@5:  0.401  auc@10:  2.082  auc@20:  7.234  pairs: 454
+---
+[per-class] (XoFTR aggregiate_scenes equivalent, units: %)
+  cloudy_cloudy                       auc@5:  5.281  auc@10: 11.747  auc@20: 20.763
+  cloudy_sunny                        auc@5:  2.246  auc@10:  6.778  auc@20: 15.267
+---
+[overall] (units: %)
+  all_class_mean                      auc@5:  3.764  auc@10:  9.262  auc@20: 18.015   # compare with MINIMA paper Table 3 ELoFTR: 2.88 / 7.88 / 17.72
+num_matches: 483.98
+
+roadscene
+
+precision@1px: 0.0710
+precision@3px: 0.4572
+precision@5px: 0.7384
+
+# v13 msyn 832
+
+[per-scene] (units: %)
+  cloudy_cloudy_scene_1               auc@5: 22.356  auc@10: 44.953  auc@20: 63.972  pairs: 131
+  cloudy_cloudy_scene_2               auc@5: 16.500  auc@10: 33.762  auc@20: 53.965  pairs: 197
+  cloudy_cloudy_scene_3               auc@5: 17.565  auc@10: 34.524  auc@20: 52.588  pairs: 266
+  cloudy_cloudy_scene_4               auc@5: 17.857  auc@10: 34.815  auc@20: 53.172  pairs: 311
+  cloudy_cloudy_scene_5               auc@5: 19.622  auc@10: 41.067  auc@20: 62.282  pairs: 180
+  cloudy_cloudy_scene_6               auc@5:  8.766  auc@10: 19.863  auc@20: 36.589  pairs: 297
+  cloudy_sunny_scene_1                auc@5: 16.974  auc@10: 34.755  auc@20: 56.337  pairs: 195
+  cloudy_sunny_scene_2                auc@5: 13.450  auc@10: 28.171  auc@20: 48.703  pairs: 270
+  cloudy_sunny_scene_3                auc@5: 12.855  auc@10: 27.787  auc@20: 45.099  pairs: 289
+  cloudy_sunny_scene_4                auc@5:  4.592  auc@10: 17.457  auc@20: 36.540  pairs: 454
+---
+[per-class] (XoFTR aggregiate_scenes equivalent, units: %)
+  cloudy_cloudy                       auc@5: 17.111  auc@10: 34.831  auc@20: 53.761
+  cloudy_sunny                        auc@5: 11.968  auc@10: 27.043  auc@20: 46.670
+---
+[overall] (units: %)
+  all_class_mean                      auc@5: 14.539  auc@10: 30.937  auc@20: 50.216   # compare with MINIMA paper Table 3 ELoFTR: 2.88 / 7.88 / 17.72
+num_matches: 467.78
+
+
+roadscene
+
+precision@1px: 0.0774
+precision@3px: 0.4482
+precision@5px: 0.7291
+
+
+# v14 msyn 640
+
+[per-scene] (units: %)
+  cloudy_cloudy_scene_1               auc@5: 28.283  auc@10: 47.900  auc@20: 63.919  pairs: 131
+  cloudy_cloudy_scene_2               auc@5: 16.955  auc@10: 34.029  auc@20: 53.919  pairs: 197
+  cloudy_cloudy_scene_3               auc@5: 23.681  auc@10: 40.696  auc@20: 56.130  pairs: 266
+  cloudy_cloudy_scene_4               auc@5: 17.229  auc@10: 33.408  auc@20: 50.120  pairs: 311
+  cloudy_cloudy_scene_5               auc@5: 22.446  auc@10: 46.303  auc@20: 66.980  pairs: 180
+  cloudy_cloudy_scene_6               auc@5: 11.419  auc@10: 24.475  auc@20: 41.517  pairs: 297
+  cloudy_sunny_scene_1                auc@5: 16.994  auc@10: 37.167  auc@20: 56.553  pairs: 195
+  cloudy_sunny_scene_2                auc@5: 12.914  auc@10: 28.034  auc@20: 49.093  pairs: 270
+  cloudy_sunny_scene_3                auc@5: 13.610  auc@10: 29.850  auc@20: 46.770  pairs: 289
+  cloudy_sunny_scene_4                auc@5:  3.846  auc@10: 15.856  auc@20: 34.685  pairs: 454
+---
+[per-class] (XoFTR aggregiate_scenes equivalent, units: %)
+  cloudy_cloudy                       auc@5: 20.002  auc@10: 37.802  auc@20: 55.431
+  cloudy_sunny                        auc@5: 11.841  auc@10: 27.727  auc@20: 46.775
+---
+[overall] (units: %)
+  all_class_mean                      auc@5: 15.922  auc@10: 32.764  auc@20: 51.103   # compare with MINIMA paper Table 3 ELoFTR: 2.88 / 7.88 / 17.72
+num_matches: 458.32
+
+roadscene
+
+precision@1px: 0.0805
+precision@3px: 0.4641
+precision@5px: 0.7353
+
+
+# v15 msyn 640 loss优化
+
+roadscene
+
+<!-- precision@1px: 0.0879
+precision@3px: 0.4899
+precision@5px: 0.7552 -->
+
+# v16 msyn 640 模态嵌入
+
+roadscene
+
+# v17 msyn 640 loss优化 + 模态嵌入
+
+roadscene
