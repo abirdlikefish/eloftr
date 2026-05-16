@@ -275,9 +275,14 @@ num_matches: 517.81
 
 roadscene
 
-precision@1px: 0.2320
+<!-- precision@1px: 0.2320
 precision@3px: 0.5665
-precision@5px: 0.6533
+precision@5px: 0.6533 -->
+
+precision@1px: 0.0815
+precision@3px: 0.4483
+precision@5px: 0.6888
+
 
 # v12 msyn 逐像素匹配 832
 
@@ -362,6 +367,13 @@ precision@5px: 0.7407
 
 # v16 msyn 640 模态嵌入
 
+[per-class] (XoFTR aggregiate_scenes equivalent, units: %)
+  cloudy_cloudy                       auc@5: 19.082  auc@10: 37.502  auc@20: 55.558
+  cloudy_sunny                        auc@5: 10.899  auc@10: 26.696  auc@20: 45.985
+---
+[overall] (units: %)
+  all_class_mean                      auc@5: 14.990  auc@10: 32.099  auc@20: 50.771  
+
 roadscene
 
 precision@1px: 0.0886
@@ -369,6 +381,13 @@ precision@3px: 0.4826
 precision@5px: 0.7447
 
 v 17 结合训练
+
+[per-class] (XoFTR aggregiate_scenes equivalent, units: %)
+  cloudy_cloudy                       auc@5:  7.799  auc@10: 16.225  auc@20: 27.410
+  cloudy_sunny                        auc@5:  1.894  auc@10:  6.741  auc@20: 17.200
+---
+[overall] (units: %)
+  all_class_mean                      auc@5:  4.846  auc@10: 11.483  auc@20: 22.305 
 
 roadscene
 
