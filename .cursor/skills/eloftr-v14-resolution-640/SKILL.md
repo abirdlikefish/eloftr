@@ -164,6 +164,9 @@ description: |
       backfill)
     eloftr-v15-pose-contrast (v14 的进一步 ablation 衍生, v14 + v1
       contrastive loss, 1 项改动)
+    eloftr-v17-llvip (v14 的 finetune 派生, v14 best ckpt + LLVIP 像素对齐
+      数据集 + aggressive single-side H aug + Schedule V2; 第一个 finetune
+      from v14 而不是 cold start outdoor.ckpt 的 v* 实验)
 ---
 
 # v14: Resolution Ablation 832 -> 640 + 多维工程加速 (Plan-Only)

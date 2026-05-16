@@ -19,7 +19,7 @@
 """
 from __future__ import annotations
 
-ALIGNED_IRVIS_SOURCES = frozenset({"roadscene", "m3fd", "megadepth_syn"})
+ALIGNED_IRVIS_SOURCES = frozenset({"roadscene", "m3fd", "megadepth_syn", "llvip"})
 
 
 def is_aligned_irvis(name) -> bool:
