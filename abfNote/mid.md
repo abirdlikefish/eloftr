@@ -347,26 +347,6 @@ precision@5px: 0.7341
 
 # v14 msyn 640
 
-<!-- [per-scene] (units: %)
-  cloudy_cloudy_scene_1               auc@5: 28.283  auc@10: 47.900  auc@20: 63.919  pairs: 131
-  cloudy_cloudy_scene_2               auc@5: 16.955  auc@10: 34.029  auc@20: 53.919  pairs: 197
-  cloudy_cloudy_scene_3               auc@5: 23.681  auc@10: 40.696  auc@20: 56.130  pairs: 266
-  cloudy_cloudy_scene_4               auc@5: 17.229  auc@10: 33.408  auc@20: 50.120  pairs: 311
-  cloudy_cloudy_scene_5               auc@5: 22.446  auc@10: 46.303  auc@20: 66.980  pairs: 180
-  cloudy_cloudy_scene_6               auc@5: 11.419  auc@10: 24.475  auc@20: 41.517  pairs: 297
-  cloudy_sunny_scene_1                auc@5: 16.994  auc@10: 37.167  auc@20: 56.553  pairs: 195
-  cloudy_sunny_scene_2                auc@5: 12.914  auc@10: 28.034  auc@20: 49.093  pairs: 270
-  cloudy_sunny_scene_3                auc@5: 13.610  auc@10: 29.850  auc@20: 46.770  pairs: 289
-  cloudy_sunny_scene_4                auc@5:  3.846  auc@10: 15.856  auc@20: 34.685  pairs: 454
----
-[per-class] (XoFTR aggregiate_scenes equivalent, units: %)
-  cloudy_cloudy                       auc@5: 20.002  auc@10: 37.802  auc@20: 55.431
-  cloudy_sunny                        auc@5: 11.841  auc@10: 27.727  auc@20: 46.775
----
-[overall] (units: %)
-  all_class_mean                      auc@5: 15.922  auc@10: 32.764  auc@20: 51.103   # compare with MINIMA paper Table 3 ELoFTR: 2.88 / 7.88 / 17.72
-num_matches: 458.32 -->
-
 [per-class] (XoFTR aggregiate_scenes equivalent, units: %)
   cloudy_cloudy                       auc@5: 18.605  auc@10: 36.957  auc@20: 54.856
   cloudy_sunny                        auc@5: 12.087  auc@10: 26.551  auc@20: 45.586
@@ -376,36 +356,22 @@ num_matches: 458.32 -->
 
 roadscene
 
-<!-- precision@1px: 0.0805
-precision@3px: 0.4641
-precision@5px: 0.7353 -->
-
 precision@1px: 0.0809
 precision@3px: 0.4667
 precision@5px: 0.7407
-
-# v15 msyn 640 loss优化
-
-[per-class] (XoFTR aggregiate_scenes equivalent, units: %)
-  cloudy_cloudy                       auc@5: 18.224  auc@10: 35.581  auc@20: 53.008
-  cloudy_sunny                        auc@5: 12.375  auc@10: 27.108  auc@20: 45.229
----
-[overall] (units: %)
-  all_class_mean                      auc@5: 15.300  auc@10: 31.344  auc@20: 49.119   
-
-roadscene
-
-precision@1px: 0.0815
-precision@3px: 0.4679
-precision@5px: 0.7401
-<!-- precision@1px: 0.0879
-precision@3px: 0.4899
-precision@5px: 0.7552 -->
 
 # v16 msyn 640 模态嵌入
 
 roadscene
 
-# v17 msyn 640 loss优化 + 模态嵌入
+precision@1px: 0.0886
+precision@3px: 0.4826
+precision@5px: 0.7447
+
+v 17 结合训练
 
 roadscene
+
+precision@1px: 0.0893
+precision@3px: 0.4757
+precision@5px: 0.7191

@@ -229,7 +229,18 @@ v17 = path K (LLVIP scale-down + aug-up finetune route). Inheritance:
   -> v17 (THIS skill, finetune + LLVIP + aggressive H, 区别于 v15/v16 平行
           ablation 因为用了 finetune 而不是 cold start)
 
+v17 sister ablation (同数据集 LLVIP, 同 H aug, 不同 ckpt 起点):
+  v0_llvip_baseline (path L, **本 skill 的 sister**, cold-start from
+    outdoor.ckpt, max_ep=18, MSLR=[4,8,12], TRUE_LR=1.25e-4, actual warmup
+    1800 step). v17 vs v0-LLVIP 回答"cross-modal feature alignment 是从头学
+    还是先 Megadepth_Syn 合成 IR pretrain 再 finetune 更好?". 详见
+    eloftr-v0-llvip-baseline SKILL.
+
 Companion:
+  eloftr-v0-llvip-baseline (★ sister cold-start ablation on **same** LLVIP
+    dataset; LLVIP infra 由 v17 落地, v0 零 src 修改复用; v0 cfg 必须显式
+    cfg.TRAINER.EARLY_STOPPING=True 跟 v17 相反, v17 cfg 没设所以 ES 实际
+    从未启用)
   eloftr-v14-resolution-640 (parent / v17 ckpt 起点 epoch=12-auc@5=0.151-
     auc@10=0.273-auc@20=0.428.ckpt)
   eloftr-v11-dualh (aggressive H aug 同款 KWARGS preset 来源)
