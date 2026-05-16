@@ -132,10 +132,30 @@ class FineMatching(nn.Module):
 
         data.update({'idx_l': idx_l, 'idx_r': idx_r})
 
-        if self.fp16:
-            grid = create_meshgrid(W, W, False, conf_matrix.device, dtype=torch.float16) - W // 2 + 0.5 # kornia >= 0.5.1
+        # v18 fine pixel idx anchor convention selector. Mirrors
+        # supervision.spvs_fine F-1 so train (supervision GT) and test
+        # (this inference grid) both use the same anchor:
+        #   False (default) = v0 paper "-3.5 trick" cell-centre anchor;
+        #     grid value range [-W/2+0.5, W/2-0.5] = [-3.5, +3.5] for W=8.
+        #     v0-v17 cfg never set ABSOLUTE_FINE_IDX -> default False ->
+        #     byte-identical to the original code path.
+        #   True = v18 absolute-idx cell-top-left anchor; grid value range
+        #     [0, W-1] = [0, 7] for W=8. v18 cfg sets True because H_vis
+        #     rotation breaks the -3.5 trick's local-linearity assumption.
+        # config is the lower_config dict; field nests as
+        # config['match_fine']['absolute_fine_idx']. .get fallback so any
+        # ckpt loaded under an old cfg dict still picks up False.
+        absolute_fine_idx = self.config.get('match_fine', {}).get('absolute_fine_idx', False)
+        if absolute_fine_idx:
+            if self.fp16:
+                grid = create_meshgrid(W, W, False, conf_matrix.device, dtype=torch.float16)
+            else:
+                grid = create_meshgrid(W, W, False, conf_matrix.device)
         else:
-            grid = create_meshgrid(W, W, False, conf_matrix.device) - W // 2 + 0.5
+            if self.fp16:
+                grid = create_meshgrid(W, W, False, conf_matrix.device, dtype=torch.float16) - W // 2 + 0.5 # kornia >= 0.5.1
+            else:
+                grid = create_meshgrid(W, W, False, conf_matrix.device) - W // 2 + 0.5
         grid = grid.reshape(1, -1, 2).expand(m, -1, -1)
         delta_l = torch.gather(grid, 1, idx_l.unsqueeze(-1).expand(-1, -1, 2))
         delta_r = torch.gather(grid, 1, idx_r.unsqueeze(-1).expand(-1, -1, 2))

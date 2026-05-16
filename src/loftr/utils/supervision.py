@@ -69,11 +69,60 @@ def spvs_coarse(data, config):
         grid_pt0_i = mask_pts_at_padded_regions(grid_pt0_i, data['mask0'])
         grid_pt1_i = mask_pts_at_padded_regions(grid_pt1_i, data['mask1'])
 
+    # v18 H aug coordinate-system bridge: H_vis is sampled in resized pixel
+    # space (because megadepth_syn_pose._read_resize_warp_pad applies it to
+    # the resized canvas), but warp_kpts works in original pixel space (K +
+    # depth + pose are all defined at original resolution). Both forward and
+    # backward warp paths need explicit 4-step scale conversions to bridge
+    # the two coordinate systems. v0-v17 path (no 'H_vis' key in data) skips
+    # both branches -> byte-identical to the un-augmented contract.
+    if 'H_vis' in data:
+        # cast to fp32 for numerical stability under autocast/fp16; warp_kpts
+        # is fp32-internal so this matches its accuracy budget.
+        H_vis_fp32 = data['H_vis'].to(torch.float32)
+        H_vis_inv_fp32 = torch.linalg.inv(H_vis_fp32)
+        inv_s1 = (1.0 / data['scale1'])[:, None, :].to(torch.float32)  # [N, 1, 2]
+        s1 = data['scale1'][:, None, :].to(torch.float32)              # [N, 1, 2]
+    else:
+        H_vis_fp32 = H_vis_inv_fp32 = inv_s1 = s1 = None
+
+    # v18 (C) backward inv(H_vis) pull: image1 coarse cell idx grid lives in
+    # AUG image1 pixel coordinates (because dataset already warped image1).
+    # warp_kpts(grid_pt1, depth1, ...) needs ORIGINAL image1 pixel idx so we
+    # invert the homography first: aug_pixel -> aug_resized -> orig_resized
+    # -> orig_pixel.
+    if 'H_vis' in data:
+        grid_pt1_resized_aug = grid_pt1_i.to(torch.float32) * inv_s1     # aug 'orig-equiv' -> aug resized
+        grid_pt1_resized_orig, _ = _warp_pts_homography(grid_pt1_resized_aug, H_vis_inv_fp32)
+        grid_pt1_for_warp = grid_pt1_resized_orig * s1                   # orig resized -> orig pixel
+        # Bug #8 (CRASH FIX): warp_kpts internally does
+        #   depth[..., y.long(), x.long()]
+        # without a bounds check; rotated cells can land outside [0, P) even
+        # after intersecting with mask1. Clamp to depth1.shape[-2:] (= 2000
+        # for Megadepth pad_to=2000, NOT image1.shape).
+        Hd, Wd = data['depth1'].shape[-2:]
+        grid_pt1_for_warp[..., 0].clamp_(0, Wd - 1)
+        grid_pt1_for_warp[..., 1].clamp_(0, Hd - 1)
+        grid_pt1_for_warp = grid_pt1_for_warp.to(grid_pt1_i.dtype)
+    else:
+        grid_pt1_for_warp = grid_pt1_i
+
     # warp kpts bi-directionally and resize them to coarse-level resolution
     # (no depth consistency check, since it leads to worse results experimentally)
     # (unhandled edge case: points with 0-depth will be warped to the left-up corner)
     _, w_pt0_i = warp_kpts(grid_pt0_i, data['depth0'], data['depth1'], data['T_0to1'], data['K0'], data['K1'])
-    _, w_pt1_i = warp_kpts(grid_pt1_i, data['depth1'], data['depth0'], data['T_1to0'], data['K1'], data['K0'])
+    _, w_pt1_i = warp_kpts(grid_pt1_for_warp, data['depth1'], data['depth0'], data['T_1to0'], data['K1'], data['K0'])
+
+    # v18 (B) forward H_vis push: w_pt0_i comes out of warp_kpts in ORIGINAL
+    # image1 pixel; push it to AUG image1 'orig-equiv' pixel via
+    # scale1 . H_vis . (1/scale1) so the downstream
+    #   w_pt0_c = w_pt0_i / scale1 = aug coarse cell idx
+    # naturally lands in aug image1 cell space (consistent with grid_pt1_c).
+    if 'H_vis' in data:
+        w_pt0_resized = w_pt0_i.to(torch.float32) * inv_s1               # orig pixel -> resized
+        w_pt0_resized_aug, _ = _warp_pts_homography(w_pt0_resized, H_vis_fp32)
+        w_pt0_i = (w_pt0_resized_aug * s1).to(w_pt0_i.dtype)             # aug resized -> aug 'orig-equiv'
+
     w_pt0_c = w_pt0_i / scale1
     w_pt1_c = w_pt1_i / scale0
 
@@ -95,6 +144,23 @@ def spvs_coarse(data, config):
         return (pt[..., 0] < 0) + (pt[..., 0] >= w) + (pt[..., 1] < 0) + (pt[..., 1] >= h)
     nearest_index1[out_bound_mask(w_pt0_c_round, w1, h1)] = 0
     nearest_index0[out_bound_mask(w_pt1_c_round, w0, h0)] = 0
+
+    # v18 (B-bis) forward mask1 cell post-filter: out_bound_mask only catches
+    # nearest cells outside [0, w1) x [0, h1); cells INSIDE the canvas but
+    # in aug-padded / vis-invalid region also need suppressing (otherwise we
+    # would build a phantom GT match into a black pixel).
+    # v18 (C-bis) backward mask1 cell post-filter: nearest_index0[b, j] was
+    # computed from cell j in aug image1; if cell j is in aug padded region
+    # the recovered image0 cell is unreliable -> suppress it so the
+    # mutual-NN loop_back check at L99-101 cannot accept it as GT.
+    if 'H_vis' in data and 'mask1' in data:
+        mask1_flat = data['mask1'].flatten(-2)                                          # [N, h1*w1] bool
+        # gather along dim=1 with idx in [0, h1*w1); always safe because
+        # out_bound_mask above already set out-of-canvas idx to 0 and
+        # mask1_flat[b, 0] is True (top-left corner is never padded).
+        target_real = torch.gather(mask1_flat, 1, nearest_index1)                       # [N, h0*w0] bool
+        nearest_index1 = torch.where(target_real, nearest_index1, torch.zeros_like(nearest_index1))
+        nearest_index0 = torch.where(mask1_flat, nearest_index0, torch.zeros_like(nearest_index0))
 
     loop_back = torch.stack([nearest_index0[_b][_i] for _b, _i in enumerate(nearest_index1)], dim=0)
     correct_0to1 = loop_back == torch.arange(h0*w0, device=device)[None].repeat(N, 1)
@@ -308,7 +374,23 @@ def spvs_fine(data, config, logger = None):
         data.update({'expec_f': torch.zeros(1, 2, device=device)})
         data.update({'expec_f_gt': torch.zeros(1, 2, device=device)})
     else:
-        grid_pt0_f = create_meshgrid(hf0, wf0, False, device) - W // 2 + 0.5 # [1, hf0, wf0, 2] # use fine coordinates
+        # v18 (F-1) grid_pt0_f anchor convention selector.
+        # Default (False) = v0 paper "-3.5 trick": cell-centre anchor, grid
+        # value range [-W/2+0.5, W/2-0.5] = [-3.5, +3.5] for W=8. The trick
+        # is paired with `+ W // 2 - 0.5` at L339 (now F-3) to yield a
+        # delta_w_pt0_f range [0, W). v0-v17 go through this branch and stay
+        # byte-identical.
+        # True = v18 absolute-idx convention: cell-top-left anchor, grid value
+        # range [0, W-1] = [0, 7] for W=8. The +3.5 cancellation is removed
+        # at F-3 below. Required for v18 because H_vis rotation breaks the
+        # trick's implicit local-linearity assumption (~4 fine-pixel residual
+        # at rot=50 deg). Both spvs_fine and fine_matching.get_fine_ds_match
+        # must read the same flag so train/test stay consistent.
+        absolute_fine_idx = config.LOFTR.MATCH_FINE.ABSOLUTE_FINE_IDX
+        if absolute_fine_idx:
+            grid_pt0_f = create_meshgrid(hf0, wf0, False, device)            # [1, hf0, wf0, 2]; absolute fine idx
+        else:
+            grid_pt0_f = create_meshgrid(hf0, wf0, False, device) - W // 2 + 0.5 # [1, hf0, wf0, 2] # use fine coordinates
         grid_pt0_f = rearrange(grid_pt0_f, 'n h w c -> n c h w')
         # 1. unfold(crop) all local windows
         if config.LOFTR.ALIGN_CORNER is False: # even windows
@@ -332,11 +414,34 @@ def spvs_fine(data, config, logger = None):
                     data['K0'][[b],...], data['K1'][[b],...]) # [k, WW], [k, WW, 2]
             correct_0to1_f[mask] = correct_0to1_f_mask.reshape(match, WW)
             w_pt0_i[mask] = w_pt0_i_mask.reshape(match, WW, 2)
-        
+
+        # v18 (F-2) per-match H_vis push: w_pt0_i comes out of warp_kpts in
+        # ORIGINAL image1 pixel; push it to AUG image1 'orig-equiv' pixel
+        # via scale1 . H_vis . (1/scale1), per-match because b_ids selects
+        # a different sample for each row of w_pt0_i.
+        if 'H_vis' in data:
+            H_vis_pm = data['H_vis'][b_ids].to(torch.float32)               # [m, 3, 3]
+            inv_s1_pm = (1.0 / data['scale1'])[b_ids][:, None, :].to(torch.float32)  # [m, 1, 2]
+            s1_pm = data['scale1'][b_ids][:, None, :].to(torch.float32)              # [m, 1, 2]
+            w_pt0_resized = w_pt0_i.to(torch.float32) * inv_s1_pm                    # [m, WW, 2] orig pixel -> resized
+            w_pt0_resized_aug, _ = _warp_pts_homography(w_pt0_resized, H_vis_pm)     # resized -> aug resized
+            w_pt0_i = (w_pt0_resized_aug * s1_pm).to(w_pt0_i.dtype)                  # aug resized -> aug 'orig-equiv'
+
         # 4. calculate the gt index of pixel-level refinement
         delta_w_pt0_i = w_pt0_i - pt1_i[b_ids, j_ids][:,None,:] # [m, WW, 2]
         del b_ids, i_ids, j_ids
-        delta_w_pt0_f = delta_w_pt0_i / scalei1[:,None,:] + W // 2 - 0.5
+        # v18 (F-3) delta convention: in v0 (-3.5 trick) path the +W//2-0.5
+        # cancels the -W//2+0.5 baked into grid_pt0_f at F-1, yielding
+        # delta_w_pt0_f range [0, W). In v18 absolute-idx path no offset is
+        # baked in, so we drop the cancellation and use delta_w_pt0_i /
+        # scalei1 directly (same [0, W) range, same downstream semantics for
+        # round / nearest_index1 / expec_f_gt). conf_matrix_f_gt and
+        # expec_f_gt are anchor-invariant cell-local fields, so LoFTRLoss
+        # numerical behaviour is unchanged across both branches.
+        if absolute_fine_idx:
+            delta_w_pt0_f = delta_w_pt0_i / scalei1[:,None,:]
+        else:
+            delta_w_pt0_f = delta_w_pt0_i / scalei1[:,None,:] + W // 2 - 0.5
         delta_w_pt0_f_round = delta_w_pt0_f[:, :, :].round()
         if config.LOFTR.LOSS.FINE_OVERLAP_WEIGHT:
             # calculate the overlap area between warped patch and grid patch as the loss weight.

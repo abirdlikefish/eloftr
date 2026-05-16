@@ -78,6 +78,13 @@ class MultiSceneDataModule(pl.LightningDataModule):
         self.mgdpt_img_pad = config.DATASET.MGDPT_IMG_PAD   # True
         self.mgdpt_depth_pad = config.DATASET.MGDPT_DEPTH_PAD   # True
         self.mgdpt_df = config.DATASET.MGDPT_DF  # 8
+
+        # v18 MegaDepth-style H aug (only consulted by MegadepthSynPoseDataset).
+        # getattr fallback so v13/v14/v15/v16 cfg (which never declared these
+        # fields) still merges cleanly even before default.py is regenerated.
+        self.mgdpt_homography_aug = getattr(config.DATASET, 'MGDPT_HOMOGRAPHY_AUG', False)
+        self.mgdpt_homography_prob = getattr(config.DATASET, 'MGDPT_HOMOGRAPHY_PROB', 1.0)
+        self.mgdpt_homography_kwargs = dict(getattr(config.DATASET, 'MGDPT_HOMOGRAPHY_KWARGS', {}))
         self.coarse_scale = 1 / config.LOFTR.RESOLUTION[0]  # 0.125. for training loftr.
 
         # RoadScene options (only consulted when DATA_SOURCE == 'RoadScene')
@@ -432,6 +439,15 @@ class MultiSceneDataModule(pl.LightningDataModule):
                         coarse_scale=self.coarse_scale,
                         cross_modal_mode=self.msyn_pose_cross_modal_mode,
                         fp16=self.fp16,
+                        # v18 H aug train-only gate: even if cfg.AUG=True, val/
+                        # test datasets must NOT augment because (a) supervision
+                        # for val loss expects unaugmented image1 (val loss is
+                        # comparable to v14 baseline), and (b) we want val/test
+                        # mkpts1_f to reflect the model's pose-recovery ability
+                        # on natural data, not on H-warped data.
+                        homography_aug=(self.mgdpt_homography_aug and mode == 'train'),
+                        homography_prob=self.mgdpt_homography_prob,
+                        homography_kwargs=self.mgdpt_homography_kwargs,
                     ))
             else:
                 raise NotImplementedError()

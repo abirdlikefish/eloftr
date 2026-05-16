@@ -154,6 +154,15 @@ _CN.LOFTR.MATCH_FINE = CN()
 _CN.LOFTR.MATCH_FINE.SPARSE_SPVS = True
 _CN.LOFTR.MATCH_FINE.LOCAL_REGRESS_TEMPERATURE = 1.0
 _CN.LOFTR.MATCH_FINE.LOCAL_REGRESS_SLICEDIM = 8
+# v18: fine-pixel-idx anchor convention. False = v0 paper "-3.5 trick" (cell
+# centre anchor; grid value range [-W/2+0.5, W/2-0.5]). True = absolute idx
+# (cell top-left anchor; grid value range [0, W-1]). Used jointly by:
+#   - supervision.spvs_fine: grid_pt0_f creation + delta_w_pt0_f offset
+#   - inference.fine_matching.get_fine_ds_match: stage-1 grid creation
+# so train/test stay consistent. Default False keeps v0-v17 byte-identical;
+# v18 cfg sets True because H_vis rotation breaks the -3.5 trick's implicit
+# local-linearity assumption (~4 fine-pixel residual at rot=50 deg).
+_CN.LOFTR.MATCH_FINE.ABSOLUTE_FINE_IDX = False
 
 # 5. LoFTR Losses
 # -- # coarse-level
@@ -227,6 +236,19 @@ _CN.DATASET.MGDPT_IMG_RESIZE = 640  # resize the longer side, zero-pad bottom-ri
 _CN.DATASET.MGDPT_IMG_PAD = True  # pad img to square with size = MGDPT_IMG_RESIZE
 _CN.DATASET.MGDPT_DEPTH_PAD = True  # pad depthmap to square with size = 2000
 _CN.DATASET.MGDPT_DF = 8
+
+# v18: Single-side rotation Homography augmentation for Megadepth-style cross-view
+# pose datasets (only consulted by MegadepthSynPoseDataset, ignored by RoadScene/
+# M3FD/MegadepthSyn-H paths). Image1 (VIS) is warped by H_vis sampled in resized
+# pixel space; image0 (IR) is untouched. supervision.spvs_coarse / spvs_fine pick
+# up data['H_vis'] only when AUG=True so v0-v16 ckpt training stays byte-identical
+# (no H_vis key in batch -> 'H_vis' in data guards skip new branches).
+#
+# Defaults preserve v0-v17 byte-identical; v18 cfg sets AUG=True with
+# KWARGS.rot_deg=50, scale_range=[1.0,1.0], trans_ratio=0.0, persp_ratio=0.0.
+_CN.DATASET.MGDPT_HOMOGRAPHY_AUG = False                # default off, v0-v16 byte-identical
+_CN.DATASET.MGDPT_HOMOGRAPHY_PROB = 1.0                 # 1.0 = always trigger when AUG=True
+_CN.DATASET.MGDPT_HOMOGRAPHY_KWARGS = CN(new_allowed=True)  # rot_deg / scale_range / trans_ratio / persp_ratio
 
 # RoadScene options (only consulted when TRAINVAL_DATA_SOURCE == 'RoadScene')
 _CN.DATASET.ROAD_IR_SUBDIR = 'cropinfrared'
